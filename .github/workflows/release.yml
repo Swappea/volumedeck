@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fetch X-Plane SDK
-        run: .github/fetch-sdk.sh
+        run: bash .github/fetch-sdk.sh
       - name: Build
         run: |
           export XPLANE_SDK_DIR="$PWD/SDK"
@@ -54,7 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64
       - name: Fetch X-Plane SDK
-        run: .github/fetch-sdk.sh
+        run: bash .github/fetch-sdk.sh
       - name: Build
         run: |
           export XPLANE_SDK_DIR="$PWD/SDK"
@@ -85,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fetch X-Plane SDK
-        run: .github/fetch-sdk.sh
+        run: bash .github/fetch-sdk.sh
       - name: Build universal binary
         run: |
           export XPLANE_SDK_DIR="$PWD/SDK"
