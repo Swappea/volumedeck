@@ -1,0 +1,173 @@
+name: Release
+
+# Cut a release by pushing a tag:
+#
+#   git tag v1.0 && git push origin v1.0
+#
+# Builds all three platforms, assembles the X-Plane plugin folder layout, and
+# attaches VolumeDeck-<tag>-XPlane.zip to a GitHub Release.
+#
+# Run it manually from the Actions tab (workflow_dispatch) to test the build
+# without publishing anything.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The SDK is not vendored in this repo (see LICENSE). Each job fetches it.
+  # Bump this when a newer SDK is required; the source needs XPLM440 or later.
+  SDK_URL: https://www.x-plane.com/wp-content/uploads/2026/09/XPSDK440b1.zip
+  SDK_VERSION: '440'
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch X-Plane SDK
+        run: .github/fetch-sdk.sh
+      - name: Build
+        run: |
+          export XPLANE_SDK_DIR="$PWD/SDK"
+          cmake -S . -B build -DSDK_VERSION=$SDK_VERSION -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lin_x64
+          path: build/lin_x64/VolumeDeck.xpl
+          if-no-files-found: error
+
+  windows:
+    # Cross-compiled from Linux with MinGW-w64, matching toolchain-win.cmake.
+    # The WIN32 branch of CMakeLists.txt passes GCC-style link flags, so MSVC
+    # is not an option here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64
+      - name: Fetch X-Plane SDK
+        run: .github/fetch-sdk.sh
+      - name: Build
+        run: |
+          export XPLANE_SDK_DIR="$PWD/SDK"
+          cmake -S . -B build \
+            -DCMAKE_TOOLCHAIN_FILE=toolchain-win.cmake \
+            -DSDK_VERSION=$SDK_VERSION -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+      - name: Check the binary has no runtime DLL dependencies
+        run: |
+          sudo apt-get install -y binutils-mingw-w64-x86-64
+          x86_64-w64-mingw32-objdump -p build/win_x64/VolumeDeck.xpl | grep 'DLL Name'
+          if x86_64-w64-mingw32-objdump -p build/win_x64/VolumeDeck.xpl \
+               | grep -qiE 'libstdc\+\+|libgcc'; then
+            echo "::error::static link flags were dropped - plugin would fail to load"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win_x64
+          path: build/win_x64/VolumeDeck.xpl
+          if-no-files-found: error
+
+  macos:
+    # Native build. Never verified in the sim by a human - see README.
+    # Allowed to fail so a bad macOS toolchain does not block a release.
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch X-Plane SDK
+        run: .github/fetch-sdk.sh
+      - name: Build universal binary
+        run: |
+          export XPLANE_SDK_DIR="$PWD/SDK"
+          cmake -S . -B build \
+            -DSDK_VERSION=$SDK_VERSION -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+          lipo -info build/mac_x64/VolumeDeck.xpl || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac_x64
+          path: build/mac_x64/VolumeDeck.xpl
+          if-no-files-found: error
+
+  release:
+    needs: [linux, windows, macos]
+    if: always() && needs.linux.result == 'success' && needs.windows.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble the X-Plane plugin folder
+        id: pkg
+        run: |
+          VERSION="${GITHUB_REF_NAME:-manual}"
+          PKG="VolumeDeck"
+          mkdir -p "dist/$PKG"
+          for plat in lin_x64 win_x64 mac_x64; do
+            if [ -f "artifacts/$plat/VolumeDeck.xpl" ]; then
+              mkdir -p "dist/$PKG/$plat"
+              cp "artifacts/$plat/VolumeDeck.xpl" "dist/$PKG/$plat/"
+              echo "included $plat"
+            else
+              echo "::warning::$plat missing from this release"
+            fi
+          done
+          cp README.md LICENSE "dist/$PKG/"
+          cd dist
+          ZIP="VolumeDeck-${VERSION}-XPlane.zip"
+          zip -qr "$ZIP" "$PKG"
+          echo "zip=dist/$ZIP" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          unzip -l "$ZIP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VolumeDeck-package
+          path: ${{ steps.pkg.outputs.zip }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          ZIP: ${{ steps.pkg.outputs.zip }}
+        run: |
+          # Generated here rather than committed, so the platform list always
+          # reflects what actually made it into this particular zip.
+          {
+            echo "## Install"
+            echo
+            echo "1. Download the zip below and unzip it."
+            echo "2. Copy the VolumeDeck folder into X-Plane 12/Resources/plugins/"
+            echo "3. Start X-Plane. The speaker icon appears in the upper right corner."
+            echo
+            echo "Requires X-Plane 12.4.4 or newer (built against SDK 4.4.0)."
+            echo
+            echo "## Included builds"
+            echo
+            for plat in lin_x64 win_x64 mac_x64; do
+              if unzip -l "$ZIP" | grep -q "$plat/VolumeDeck.xpl"; then
+                echo "- $plat"
+              else
+                echo "- $plat (not included in this release)"
+              fi
+            done
+            echo
+            echo "Only the Windows build has been run in the simulator by a human."
+            echo "See the AI assistance note in the README."
+          } > notes.md
+          gh release create "$VERSION" "$ZIP"             --title "VolumeDeck $VERSION"             --notes-file notes.md

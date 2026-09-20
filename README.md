@@ -250,6 +250,17 @@ Changes in this fork: rendering moved from OpenGL to the `XPLMPanelGraphics` API
 boxel-correct coordinates for scaled displays, 27 bindable X-Plane commands, per-channel mute,
 and a switchable column/row layout.
 
+## AI assistance
+
+Much of this fork was written with **Claude** (Anthropic), via Claude Code — including
+the port from OpenGL to `XPLMPanelGraphics`, the pixel/boxel coordinate fix, the command
+layer, and the knob rendering. The work was directed, reviewed and tested by a human
+against X-Plane 12.4.4 on Windows; nothing here was merged unverified.
+
+Flagging this because you are about to load a binary into your simulator and deserve to
+know how it was produced. The Linux and macOS builds in particular have **not** been
+run by anyone — see Requirements.
+
 ## License
 
-MIT License, inherited from the projects credited above.
+[MIT](LICENSE), inherited from the projects credited above.
