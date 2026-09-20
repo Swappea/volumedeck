@@ -1,26 +1,30 @@
-name: Release
+name: Build
 
-# Cut a release by pushing a tag:
+# Nothing here publishes on its own. Run it from the Actions tab:
 #
-#   git tag v1.0 && git push origin v1.0
+#   - Leave "version" empty -> just builds and attaches the zip as a workflow
+#                              artifact, so you can test a change.
+#   - Set "version" (v1.0)  -> additionally creates a DRAFT release with the
+#                              zip attached. You write the description and
+#                              press Publish yourself.
 #
-# Builds all three platforms, assembles the X-Plane plugin folder layout, and
-# attaches VolumeDeck-<tag>-XPlane.zip to a GitHub Release.
-#
-# Run it manually from the Actions tab (workflow_dispatch) to test the build
-# without publishing anything.
+# A draft release does not create its git tag until you publish it, so nothing
+# is tagged and nothing is public until you say so.
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for a draft release (e.g. v1.0). Leave empty to only build.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
 env:
-  # The SDK is not vendored in this repo (see LICENSE). Each job fetches it.
-  # Bump this when a newer SDK is required; the source needs XPLM440 or later.
+  # The SDK is Laminar's and is not vendored here (see LICENSE), so each job
+  # fetches it. Bump when a newer SDK is required; the source needs XPLM440+.
   SDK_URL: https://www.x-plane.com/wp-content/uploads/2026/09/XPSDK440b1.zip
   SDK_VERSION: '440'
 
@@ -78,8 +82,8 @@ jobs:
           if-no-files-found: error
 
   macos:
-    # Native build. Never verified in the sim by a human - see README.
-    # Allowed to fail so a bad macOS toolchain does not block a release.
+    # Native universal build. Never verified in the sim by a human - see README.
+    # Allowed to fail so an untested toolchain cannot block a build.
     runs-on: macos-latest
     continue-on-error: true
     steps:
@@ -100,7 +104,7 @@ jobs:
           path: build/mac_x64/VolumeDeck.xpl
           if-no-files-found: error
 
-  release:
+  package:
     needs: [linux, windows, macos]
     if: always() && needs.linux.result == 'success' && needs.windows.result == 'success'
     runs-on: ubuntu-latest
@@ -113,9 +117,11 @@ jobs:
 
       - name: Assemble the X-Plane plugin folder
         id: pkg
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME:-manual}"
-          PKG="VolumeDeck"
+          LABEL="${VERSION:-$(git rev-parse --short HEAD)}"
+          PKG=VolumeDeck
           mkdir -p "dist/$PKG"
           for plat in lin_x64 win_x64 mac_x64; do
             if [ -f "artifacts/$plat/VolumeDeck.xpl" ]; then
@@ -123,15 +129,15 @@ jobs:
               cp "artifacts/$plat/VolumeDeck.xpl" "dist/$PKG/$plat/"
               echo "included $plat"
             else
-              echo "::warning::$plat missing from this release"
+              echo "::warning::$plat missing from this build"
             fi
           done
           cp README.md LICENSE "dist/$PKG/"
           cd dist
-          ZIP="VolumeDeck-${VERSION}-XPlane.zip"
+          ZIP="VolumeDeck-${LABEL}-XPlane.zip"
           zip -qr "$ZIP" "$PKG"
           echo "zip=dist/$ZIP" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           unzip -l "$ZIP"
 
       - uses: actions/upload-artifact@v4
@@ -139,16 +145,18 @@ jobs:
           name: VolumeDeck-package
           path: ${{ steps.pkg.outputs.zip }}
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+      # Draft only. The tag is not created and nothing is visible publicly
+      # until you edit the description and press Publish on the Releases page.
+      - name: Create draft release
+        if: ${{ inputs.version != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.pkg.outputs.version }}
+          VERSION: ${{ inputs.version }}
           ZIP: ${{ steps.pkg.outputs.zip }}
         run: |
-          # Generated here rather than committed, so the platform list always
-          # reflects what actually made it into this particular zip.
           {
+            echo "_Draft - replace this with your own description before publishing._"
+            echo
             echo "## Install"
             echo
             echo "1. Download the zip below and unzip it."
@@ -163,11 +171,10 @@ jobs:
               if unzip -l "$ZIP" | grep -q "$plat/VolumeDeck.xpl"; then
                 echo "- $plat"
               else
-                echo "- $plat (not included in this release)"
+                echo "- $plat (not included in this build)"
               fi
             done
-            echo
-            echo "Only the Windows build has been run in the simulator by a human."
-            echo "See the AI assistance note in the README."
           } > notes.md
-          gh release create "$VERSION" "$ZIP"             --title "VolumeDeck $VERSION"             --notes-file notes.md
+          gh release create "$VERSION" "$ZIP" --draft --target "$GITHUB_SHA" --title "VolumeDeck $VERSION" --notes-file notes.md
+          echo "Draft created - edit and publish it here:"
+          gh release view "$VERSION" --json url --jq .url

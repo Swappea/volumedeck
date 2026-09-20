@@ -139,6 +139,16 @@ shift when plugins are added or removed.
 For press-and-hold buttons the WebSocket interface at `ws://localhost:8086/api/v2` is a
 better fit: send `command_set_is_active` with `is_active: true` and no `duration` to
 hold, then `is_active: false` to release.
+## Releases
+
+Prebuilt plugins are on the [Releases page](../../releases).
+
+Releases are cut by hand, not automatically. The **Build** workflow (Actions tab) can be
+run manually with a version like `v1.0`; it builds all three platforms and opens a *draft*
+release with the zip attached. The tag is only created, and the release only becomes
+visible, when the draft is published. Leaving the version empty just builds and attaches
+the zip as a workflow artifact.
+
 ## Installation
 
 Extract the release package to X-Plane plugins directory:
