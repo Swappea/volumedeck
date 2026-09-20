@@ -121,6 +121,12 @@ The -2 state is produced by a three-stage probe driven by `initialTestStage` in 
 
 `X-Plane 12/Output/preferences/VolumeDeck.dat`, a line-oriented text format: `VERSION <n>`, an optional `X:<x> Y:<y>` panel position, then one line per aircraft — the `.acf` filename followed by 8 `interior exterior` float pairs. Save rewrites the whole file, preserving other aircraft's lines. `FILE_FORMAT_VERSION` is 2; a loaded file with version ≤ 1 leaves `saveRequired` set so the entry is rewritten in the current format. Saving is manual — the user clicks the floppy icon or runs `volumedeck/panel/save`.
 
+`loadConfig()` falls back to `getLegacyConfigPath()` (`VolumeControl.dat`) when
+`VolumeDeck.dat` does not exist, so settings survive the rename from the plugin this
+forked from. It is read-only and flags `saveRequired` so the first save writes the new
+name; the old file is never modified or deleted. Do not remove this until the upstream
+plugin is long gone.
+
 An optional `LAYOUT <0|1>` line stores the chosen layout. It needed no format bump because the parser already skips lines it does not recognise — new optional keys can be added the same way. Mute state is deliberately *not* persisted, which is why `preMuteVolume` stays out of the file.
 
 ### Coordinate system
@@ -138,6 +144,33 @@ The header icon strip is laid out by the shared constants `ICON_SOUND_W`, `ICON_
 Two layouts share all of this. `LAYOUT_VERTICAL` is a column with labels in a strip to the left of each knob; `LAYOUT_HORIZONTAL` is a row with labels centred underneath. `panelWidth()`/`panelHeight()` and `updateKnobPositions()` branch on `layout`, and `isMouseOverKnob()` only includes the label strip in the vertical case.
 
 Row cells are sized by `horizontalCell()`, which measures all eight labels with `XPLMFontMeasureString` and takes the widest. Do not replace it with a fixed pitch: a constant narrower than the widest label makes adjacent labels collide ("InteriorExteriorMaster").
+
+## Releases
+
+`.github/workflows/build.yml` is dispatch-only and **never publishes on its own** - there
+is deliberately no tag trigger. Run it from the Actions tab:
+
+- no `version` input: builds all platforms, attaches the zip as a workflow artifact.
+- `version` set (e.g. `v1.0`): also opens a **draft** release with the zip attached. The
+  git tag is not created until a human publishes the draft, so the description is always
+  written by hand.
+
+Jobs build Linux and Windows (MinGW cross, matching `toolchain-win.cmake`) on Ubuntu, and
+a universal macOS binary on macos-latest. The macOS job is `continue-on-error` because no
+human has ever run that binary in the sim.
+
+`.github/fetch-sdk.sh` downloads the SDK per job, since it cannot be vendored (see
+`LICENSE`), and fails early if the SDK predates XPLM440 rather than dying mid-compile.
+Bump `SDK_URL` in the workflow when a newer SDK is needed.
+
+The Windows job **fails the build** if `libstdc++`/`libgcc` appear in the binary's imports.
+That is the regression that would make the plugin silently refuse to load on machines
+without MSYS2, and it is invisible without the check.
+
+Two traps worth remembering: `core.filemode` is false on Windows, so a new script under
+`.github/` needs `git update-index --chmod=+x` or CI fails with "Permission denied"; and
+the tag a draft creates points at the commit CI actually built, not at whatever `main`
+has drifted to by publish time.
 
 ## Conventions
 
