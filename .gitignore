@@ -1,0 +1,33 @@
+# Build directories
+build/
+dist/
+*.o
+
+# SDK directories (use XPLANE_SDK_DIR environment variable instead)
+SDK/
+macos-sdk-headers/
+macos-headers.tar.gz
+
+# IDE files
+.vscode/*.log
+.vscode
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+compile_commands.json
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Config files (user-specific)
+*.dat
+
