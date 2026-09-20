@@ -250,9 +250,10 @@ X-Plane's own `Resources/fonts`, so there is nothing extra to install.
 
 This plugin stands on two earlier projects:
 
-- **B2VolumeControl.lua** by *B2videogames* — the original Lua script whose UI layout and
-  per-aircraft configuration behaviour this plugin reproduces.
-- **[volumedeck](https://github.com/verres1/volumedeck)**
+- **[B2VolumeControl.lua](https://github.com/B2VideoGames/B2VolumeControl)** by
+  **[B2videogames](https://github.com/B2VideoGames)** — the original FlyWithLua script whose
+  UI layout and per-aircraft configuration behaviour this plugin reproduces.
+- **[volume-control-xplane-plugin](https://github.com/verres1/volume-control-xplane-plugin)**
   by **[verres1](https://github.com/verres1)** — the original C++ port of that script, which
   this repository continues from.
 
