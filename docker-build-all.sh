@@ -63,7 +63,7 @@ cp -r dist/mac_x64 "$PACKAGE_DIR/" 2>/dev/null || true
 cp README.md "$PACKAGE_DIR/" 2>/dev/null || echo "No README found"
 
 # Get version from source
-VERSION=$(grep "Version 1.0" src/main.cpp | head -1 | sed 's/.*Version \([0-9.]*\).*/\1/')
+VERSION=$(sed -n 's/^#define SOFTWARE_VERSION "\(.*\)"/\1/p' src/VolumeDeck.h | head -1)
 if [ -z "$VERSION" ]; then
     VERSION="1.0"
 fi

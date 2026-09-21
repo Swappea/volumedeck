@@ -26,7 +26,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     
     XPLMDebugString("============================================\n");
     XPLMDebugString("VolumeDeck: Plugin starting...\n");
-    XPLMDebugString("VolumeDeck: Version 1.0 (C++ Plugin)\n");
+    XPLMDebugString("VolumeDeck: Version " SOFTWARE_VERSION " (C++ Plugin)\n");
     XPLMDebugString("============================================\n");
 
     // macOS only, and it must come before anything that touches a path. Without

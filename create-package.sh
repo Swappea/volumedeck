@@ -18,7 +18,7 @@ if [ ! -d "build/lin_x64" ] && [ ! -d "build/win_x64" ] && [ ! -d "build/mac_x64
 fi
 
 # Get version
-VERSION=$(grep "Version 1.0" src/main.cpp | head -1 | sed 's/.*Version \([0-9.]*\).*/\1/' || echo "1.0")
+VERSION=$(sed -n 's/^#define SOFTWARE_VERSION "\(.*\)"/\1/p' src/VolumeDeck.h | head -1)
 
 # Create package structure
 PACKAGE_DIR="dist/VolumeDeck"

@@ -12,7 +12,9 @@
 #include "XPLMPanelGraphics.h"
 #include <stdint.h>
 
-#define SOFTWARE_VERSION "1.0"
+// The one place the plugin version lives. main.cpp logs it, and
+// create-package.sh / docker-build-all.sh scrape this line to name the zip.
+#define SOFTWARE_VERSION "1.0.1"
 #define FILE_FORMAT_VERSION 2
 
 // Knob state constants
