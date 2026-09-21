@@ -176,7 +176,10 @@ FUNCTION(add_xplane_plugin library_name library_version)
 ENDFUNCTION(add_xplane_plugin)
 
 IF(NOT DEFINED SDK_VERSION)
-    SET(SDK_VERSION 301)
+    # 440 is the only value that compiles: the drawing layer is built on
+    # XPLMPanelGraphics, which needs XPLM440. The old 301 default failed with
+    # "unknown type name 'XPLMFontHandle'", so a plain `cmake ..` never worked.
+    SET(SDK_VERSION 440)
     MESSAGE(STATUS "SDK_VERSION not defined, defaulting to ${SDK_VERSION}")
 ENDIF()
 
