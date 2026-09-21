@@ -2,6 +2,7 @@
 #include "VolumeCommands.h"
 #include "XPLMDisplay.h"
 #include "XPLMUtilities.h"
+#include "XPLMPlugin.h"
 #include "XPLMDefs.h"
 #include <cstring>
 
@@ -27,7 +28,21 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     XPLMDebugString("VolumeDeck: Plugin starting...\n");
     XPLMDebugString("VolumeDeck: Version 1.0 (C++ Plugin)\n");
     XPLMDebugString("============================================\n");
-    
+
+    // macOS only, and it must come before anything that touches a path. Without
+    // this, XPLMGetSystemPath returns a legacy HFS path ("T7 Shield:X-Plane 12:"),
+    // which ensureFont() concatenates and hands straight back to X-Plane -- and a
+    // bad directory character there is fatal, not an error return. It takes the
+    // whole sim down and blames the plugin.
+    //
+    // Deliberately NOT enabled on Windows/Linux. Per XPLMPlugin.h, Linux returns
+    // native paths either way, but Windows would switch from "C:\X-Plane 12\" to
+    // "C:/X-Plane 12/". That spelling works fine, yet those two platforms ship
+    // working builds today and this fix does not need them to change.
+#if APL
+    XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1);
+#endif
+
     // Commands are created here rather than in XPluginEnable: they outlive the
     // plugin, and creating them early makes them visible to the joystick/keyboard
     // binding UI and the web API regardless of enable state.
