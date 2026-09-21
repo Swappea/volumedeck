@@ -241,15 +241,25 @@ float VolumeDeck::flightLoopCallback(float elapsedSinceLastCall, float elapsedTi
             }
         }
         
-        // Handle view changes (interior/exterior)
-        int currentView = XPLMGetDatai(vc->viewExternalDataRef);
-        if (currentView != vc->prevView) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "VolumeDeck: [LOOP] View changed: %d -> %d\n", vc->prevView, currentView);
-            XPLMDebugString(msg);
-            vc->updateVolumesForViewChange();
-            vc->prevView = currentView;
-            vc->firstDraw = true;
+        // Handle view changes (interior/exterior). Suppressed entirely while the
+        // writability probe is in flight. Stage 1 parks each real volume in
+        // exteriorVolume, which is >= 0 and therefore indistinguishable from
+        // split mode to updateVolumesForViewChange() -- it would write that
+        // stashed value back over the 0.03125 test value, so stage 2 would read
+        // a mismatch and mark all eight knobs KNOB_FAILED_TEST (drawn grey and
+        // refusing mode toggles). prevView is deliberately left untouched so the
+        // change is re-detected on the next tick, once stage 3 has loaded the
+        // config and there are real per-view volumes to apply.
+        if (vc->initialTestStage == 0) {
+            int currentView = XPLMGetDatai(vc->viewExternalDataRef);
+            if (currentView != vc->prevView) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "VolumeDeck: [LOOP] View changed: %d -> %d\n", vc->prevView, currentView);
+                XPLMDebugString(msg);
+                vc->updateVolumesForViewChange();
+                vc->prevView = currentView;
+                vc->firstDraw = true;
+            }
         }
         
     } catch (...) {
@@ -959,7 +969,12 @@ void VolumeDeck::loadConfig() {
                 float intVol, extVol;
                 while (iss >> intVol >> extVol && knobNum < NUM_KNOBS) {
                     knobs[knobNum].interiorVolume = intVol;
-                    knobs[knobNum].exteriorVolume = extVol;
+                    // Builds before this fix wrote KNOB_FAILED_TEST (-2) to disk.
+                    // Collapse any negative sentinel to single-value mode so an
+                    // already-poisoned file heals itself on the next load rather
+                    // than locking the knob grey forever.
+                    knobs[knobNum].exteriorVolume =
+                        (extVol < 0.0f) ? KNOB_SINGLE_MARK : extVol;
                     
                     int currentView = XPLMGetDatai(viewExternalDataRef);
                     if (currentView == 0 || knobs[knobNum].exteriorVolume < 0) {
@@ -1013,7 +1028,14 @@ void VolumeDeck::saveConfig() {
     // Write current aircraft data
     newContent << currentAircraft;
     for (int i = 0; i < NUM_KNOBS; i++) {
-        newContent << " " << knobs[i].interiorVolume << " " << knobs[i].exteriorVolume;
+        // KNOB_FAILED_TEST describes THIS run's probe, not a user setting -- the
+        // same dataref may be writable under another aircraft or a later X-Plane
+        // build. It must never reach the file: config load is stage 3, after the
+        // probe, so a persisted -2 would overwrite a perfectly good probe result
+        // and lock the knob grey on every future launch. Save it as single-value.
+        float ext = knobs[i].exteriorVolume;
+        if (ext == KNOB_FAILED_TEST) ext = KNOB_SINGLE_MARK;
+        newContent << " " << knobs[i].interiorVolume << " " << ext;
     }
     newContent << "\n";
     
