@@ -23,7 +23,11 @@ export XPLANE_SDK_DIR="$(pwd)/SDK"   # SDK 4.4.0-b1, in-tree but gitignored
 
 There are no tests and no linter. Verification is: build cleanly, install, launch X-Plane, and read the `XPLMDebugString` output in `X-Plane 12/Log.txt` (every code path logs with a `VolumeDeck: [TAG]` prefix).
 
-Manual CMake invocation must pass `-DSDK_VERSION=440`. `CMakeLists.txt` still defaults to 301 for historical reasons, and that default no longer compiles — always pass 440 explicitly.
+Before blaming the plugin for a load failure, check the sim exports the API:
+`nm -g "$XP/Resources/plugins/XPLM.framework/XPLM" | grep _XPLMCreateFont` (macOS).
+12.4.3 has 298 XPLM exports and no panel-graphics API at all; 12.4.4 has 401.
+
+`SDK_VERSION` defaults to 440, which is the only value the current source compiles with, so a bare `cmake ..` works. Anything lower fails at `unknown type name 'XPLMFontHandle'`.
 
 ### Windows native build (MSYS2 / MinGW-w64)
 
@@ -117,6 +121,11 @@ Each `VolumeKnob` wraps one `sim/operation/sound/*_volume_ratio` dataref. `exter
 
 The -2 state is produced by a three-stage probe driven by `initialTestStage` in the flight loop: stage 1 stashes the current volume and writes `0.03125`, stage 2 (next second) reads back to see whether the write stuck, restores the original, and records the result; stage 3 loads the config. Config loading is deliberately last so it overwrites the probe's sentinels for knobs that did work.
 
+Two invariants hold this together; breaking either greys out all eight knobs:
+
+- **Stage 1 parks the real volume in `exteriorVolume`** — a fourth meaning on top of the three above. It is `>= 0`, so `updateVolumesForViewChange()` reads it as split mode and writes it back over the test value. The flight loop's view-change block is therefore guarded by `initialTestStage == 0`, like the `syncKnobFromDataRef` loop above it.
+- **`KNOB_FAILED_TEST` must never be persisted.** It describes one run's probe, not a user setting, and config load runs *after* the probe — so a saved `-2` overrides a good probe result on every later launch, permanently. `saveConfig()` writes it as `KNOB_SINGLE_MARK`; `loadConfig()` collapses any negative value from disk to `-1`.
+
 ### Config file
 
 `X-Plane 12/Output/preferences/VolumeDeck.dat`, a line-oriented text format: `VERSION <n>`, an optional `X:<x> Y:<y>` panel position, then one line per aircraft — the `.acf` filename followed by 8 `interior exterior` float pairs. Save rewrites the whole file, preserving other aircraft's lines. `FILE_FORMAT_VERSION` is 2; a loaded file with version ≤ 1 leaves `saveRequired` set so the entry is rewritten in the current format. Saving is manual — the user clicks the floppy icon or runs `volumedeck/panel/save`.
@@ -167,10 +176,14 @@ The Windows job **fails the build** if `libstdc++`/`libgcc` appear in the binary
 That is the regression that would make the plugin silently refuse to load on machines
 without MSYS2, and it is invisible without the check.
 
-Two traps worth remembering: `core.filemode` is false on Windows, so a new script under
-`.github/` needs `git update-index --chmod=+x` or CI fails with "Permission denied"; and
+Two traps worth remembering: `core.filemode` is false on Windows, so any new script —
+under `.github/` or at the repo root — needs `git update-index --chmod=+x`, or CI fails
+with "Permission denied" and `./build.sh` fails the same way on a fresh clone; and
 the tag a draft creates points at the commit CI actually built, not at whatever `main`
 has drifted to by publish time.
+
+A draft cannot be marked Latest (`422: Latest release cannot be draft or prerelease`).
+Publish first, then `gh release edit <tag> --latest` if the badge has not moved.
 
 ## Conventions
 
@@ -179,4 +192,5 @@ has drifted to by publish time.
 - Drawing goes through `XPLMPanelGraphics` via the helpers on the class (`drawFilledCircle`, `drawArc`, …). There is no global colour or line-width state as there was in GL, so `setColor()`/`setLineWidth()` stash values that each primitive passes along.
 - **Never create or destroy a panel-graphics resource inside the draw callback.** `XPLMCreateFont` there is a hard runtime violation that takes the sim down with "Never call this function from within a panel draw callback" — it is not documented in the headers or the SDK docs tree, only enforced at runtime. The font is built in `initialize()` and retried from the flight loop; `drawString()` skips text when it is missing rather than creating one.
 - `CMakeLists.txt` globs `src/*.cpp`, so new source files need no build edits, but a fresh CMake configure.
+- **`XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1)` sits under `#if APL` in `XPluginStart` and must stay ahead of any path call.** Without it macOS returns HFS paths (`Macintosh HD:Users:…`); handing one back to X-Plane (e.g. `XPLMFontAddFace`) is fatal, not an error return — it downs the sim and blames the plugin. Deliberately not enabled on Windows/Linux: Linux is identical either way, and Windows would switch to `C:/…`, changing builds that work today.
 - `CMakeLists.txt` still links `opengl32` (Windows) and the OpenGL framework (macOS) from the pre-panel-graphics era. Harmless leftovers — no GL symbols are referenced any more, and `objdump -p` confirms the built `.xpl` imports only `KERNEL32`, `msvcrt` and `XPLM_64.dll`.

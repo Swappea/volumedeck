@@ -31,3 +31,8 @@ Thumbs.db
 # Config files (user-specific)
 *.dat
 
+
+# X-Plane logs copied in for debugging. The sim rewrites Log.txt on every
+# start, so a copy dropped here is always a transient artefact.
+Log.txt
+Log_*.txt
