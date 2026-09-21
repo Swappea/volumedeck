@@ -34,7 +34,13 @@ cd "$BUILD_DIR"
 
 # Run CMake
 echo "Configuring build for $PLATFORM..."
-cmake -DSDK_VERSION=301 ..
+CMAKE_ARGS=(-DSDK_VERSION=440)
+if [[ "$PLATFORM" == "mac" ]]; then
+    # X-Plane may be the Intel build running under Rosetta even on Apple Silicon;
+    # a single-arch .xpl is silently skipped by the other one.
+    CMAKE_ARGS+=(-DCMAKE_OSX_ARCHITECTURES="x86_64;arm64")
+fi
+cmake "${CMAKE_ARGS[@]}" ..
 
 # Build
 echo "Building plugin..."
