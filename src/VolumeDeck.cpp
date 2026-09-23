@@ -3,6 +3,7 @@
 #include "XPLMUtilities.h"
 #include "XPLMProcessing.h"
 #include "XPLMPlanes.h"
+#include "XPLMPlugin.h"
 #include "XPLMGraphics.h"
 #include <cmath>
 #include <fstream>
@@ -28,6 +29,10 @@ const float VolumeDeck::LABEL_FONT_SIZE = 15.0f;
 // Owner-plugin caption over an add-on group ("X-ATC-Chatter"). Smaller and quieter
 // than a channel label so it reads as a heading rather than another control.
 const float VolumeDeck::CAPTION_FONT_SIZE = 11.0f;
+// The sim group is captioned too. Without it, X-Plane's own knobs were the only
+// bank on the panel with nothing saying whose they are -- which reads as if the
+// captioned add-on group is the odd one out rather than a peer.
+static const char* const SIM_GROUP_CAPTION = "X-Plane";
 // Space between the sim group and an add-on group, with the divider down the middle.
 const float VolumeDeck::GROUP_GAP = 10.0f;
 const float VolumeDeck::ICON_SOUND_W   = 40.0f;
@@ -206,7 +211,7 @@ float VolumeDeck::flightLoopCallback(float elapsedSinceLastCall, float elapsedTi
         // A third-party dataref may not exist when we enable -- plugin load order is
         // not guaranteed, and the add-on may even be installed but disabled. Keep
         // looking; it is a handful of string lookups once a second.
-        vc->resolveAddonDataRefs();
+        vc->refreshAddonChannels();
 
         // Handle initialization tests. Sim channels only: an add-on channel runs its
         // own two-tick probe from serviceKnobProbes(), because it may not have existed
@@ -619,21 +624,59 @@ void VolumeDeck::setChannelEnabled(int index, bool on) {
     }
 }
 
-// Third-party datarefs are owned by another plugin, which may load after we do, may
-// not be installed at all, or may be switched off in X-Plane's plugin admin. So the
-// lookup is retried from the flight loop rather than done once at startup.
-void VolumeDeck::resolveAddonDataRefs() {
+// Third-party channels come and go at runtime, in both directions: the owning plugin
+// may load after we do, may not be installed at all, or may be switched off (or back
+// on) in Plugin Admin mid-session. So this re-evaluates every add-on every tick rather
+// than resolving once and caching forever.
+//
+// Two signals, and both are needed. The dataref alone is not enough: a plugin disabled
+// in Plugin Admin gets XPluginDisable, but whether that unregisters its datarefs is up
+// to the plugin, so the dataref can outlive the thing that services it -- which is
+// exactly how a disabled X-ATC-Chatter went on reading "detected". XPLMIsPluginEnabled()
+// answers the question the dataref cannot.
+void VolumeDeck::refreshAddonChannels() {
     for (int i = 0; i < NUM_KNOBS; i++) {
         VolumeKnob& knob = knobs[i];
-        if (!knob.isAddon || knob.available) continue;
+        if (!knob.isAddon) continue;
 
-        knob.dataRef = XPLMFindDataRef(knob.def->dataref);
-        if (knob.dataRef == nullptr) continue;
+        bool running = true;
+        if (knob.def->pluginSignature != nullptr) {
+            XPLMPluginID owner = XPLMFindPluginBySignature(knob.def->pluginSignature);
+            running = (owner != XPLM_NO_PLUGIN_ID) && (XPLMIsPluginEnabled(owner) != 0);
+        }
 
-        knob.available = true;
-        groupsDirty = true;
+        XPLMDataRef found = running ? XPLMFindDataRef(knob.def->dataref) : nullptr;
+        bool nowAvailable = (found != nullptr);
+
+        if (nowAvailable == knob.available) {
+            knob.dataRef = found;   // handles can be reissued across a reload
+            continue;
+        }
 
         char msg[400];
+
+        if (!nowAvailable) {
+            // Gone. Drop the handle rather than keeping it: it belonged to a plugin
+            // that may since have been unloaded, and a stale dataref handle is not
+            // safe to read, let alone write. Clearing `probed` means a fresh
+            // writability probe if the add-on comes back.
+            knob.dataRef    = nullptr;
+            knob.available  = false;
+            knob.probeStage = 0;
+            knob.probed     = false;
+            groupsDirty     = true;
+
+            snprintf(msg, sizeof(msg), "VolumeDeck: [ADDON] Lost %s (%s) -- %s\n",
+                     knob.def->dataref, knob.ownerName.c_str(),
+                     running ? "dataref unregistered" : "plugin disabled or unloaded");
+            XPLMDebugString(msg);
+            continue;
+        }
+
+        knob.dataRef   = found;
+        knob.available = true;
+        groupsDirty    = true;
+
         snprintf(msg, sizeof(msg), "VolumeDeck: [ADDON] Found %s (%s) -> %s\n",
                  knob.def->dataref, knob.ownerName.c_str(),
                  knob.enabled ? "controlling" : "not controlling (off in Settings)");
@@ -825,7 +868,9 @@ void VolumeDeck::buildGroups() {
     groups.clear();
 
     PanelGroup sim;
-    sim.labelWidth = FIXED_TEXT_SPACE;
+    sim.caption      = SIM_GROUP_CAPTION;
+    sim.isAddonGroup = false;
+    sim.labelWidth   = FIXED_TEXT_SPACE;
     sim.captionX = sim.captionY = 0.0f;
     sim.dividerPos = 0.0f;
     sim.hasDivider = false;
@@ -843,7 +888,7 @@ void VolumeDeck::buildGroups() {
 
         int found = -1;
         for (size_t g = 0; g < groups.size(); g++) {
-            if (!groups[g].caption.empty() && groups[g].caption == knobs[i].ownerName) {
+            if (groups[g].isAddonGroup && groups[g].caption == knobs[i].ownerName) {
                 found = (int)g;
                 break;
             }
@@ -851,6 +896,7 @@ void VolumeDeck::buildGroups() {
         if (found < 0) {
             PanelGroup fresh;
             fresh.caption = knobs[i].ownerName;
+            fresh.isAddonGroup = true;
             fresh.labelWidth = 0.0f;
             fresh.captionX = fresh.captionY = 0.0f;
             fresh.dividerPos = 0.0f;
@@ -861,17 +907,20 @@ void VolumeDeck::buildGroups() {
         groups[found].knobIndices.push_back(i);
     }
 
-    // An add-on column only needs to be as wide as its own labels -- and as its
-    // caption, or "X-ATC-Chatter" would hang off the end of a one-knob column.
+    // An add-on column only needs to be as wide as its own labels -- and every column
+    // has to be wide enough for its caption, or "X-ATC-Chatter" hangs off the end of a
+    // one-knob column.
     for (size_t g = 0; g < groups.size(); g++) {
-        if (groups[g].caption.empty()) continue;
+        float w = groups[g].labelWidth;   // FIXED_TEXT_SPACE for the sim column
 
-        float w = 0.0f;
-        for (size_t k = 0; k < groups[g].knobIndices.size(); k++) {
-            float m = measureText(knobs[groups[g].knobIndices[k]].displayName.c_str(), LABEL_FONT_SIZE);
-            if (m > w) w = m;
+        if (groups[g].isAddonGroup) {
+            for (size_t k = 0; k < groups[g].knobIndices.size(); k++) {
+                float m = measureText(knobs[groups[g].knobIndices[k]].displayName.c_str(),
+                                      LABEL_FONT_SIZE);
+                if (m > w) w = m;
+            }
+            w += GAP_FIVE * 2.0f;
         }
-        w += GAP_FIVE * 2.0f;
 
         float capOverhang = measureText(groups[g].caption.c_str(), CAPTION_FONT_SIZE)
                           + GAP_FIVE - KNOB_RADIUS * 2.0f;
@@ -881,14 +930,9 @@ void VolumeDeck::buildGroups() {
     }
 }
 
-// Vertical space reserved above every column for the owner captions. Reserved on all
-// columns at once, including the sim column that has no caption, so the knob rows
-// still line up across the panel.
+// Vertical space reserved above each group for its caption.
 float VolumeDeck::captionHeight() const {
-    for (size_t g = 0; g < groups.size(); g++) {
-        if (!groups[g].caption.empty()) return CAPTION_FONT_SIZE + GAP_FIVE;
-    }
-    return 0.0f;
+    return groups.empty() ? 0.0f : (CAPTION_FONT_SIZE + GAP_FIVE);
 }
 
 // Panel extent measured from the mainX/mainY anchor, per layout.
@@ -916,12 +960,11 @@ float VolumeDeck::panelHeight() const {
     if (groups.empty()) return KNOB_RADIUS * 2 + (2 * GAP_FIVE);
 
     if (layout == LAYOUT_HORIZONTAL) {
-        // One row of knobs per group, each with a label line underneath and, for an
-        // add-on group, a caption line above.
+        // One row of knobs per group, each with a caption line above and a label line
+        // underneath.
         float h = H_GAP;
         for (size_t g = 0; g < groups.size(); g++) {
-            h += KNOB_RADIUS * 2 + GAP_FIVE + LABEL_FONT_SIZE + H_GAP;
-            if (!groups[g].caption.empty()) h += captionHeight();
+            h += captionHeight() + KNOB_RADIUS * 2 + GAP_FIVE + LABEL_FONT_SIZE + H_GAP;
         }
         return h;
     }
@@ -968,15 +1011,12 @@ void VolumeDeck::updateKnobPositions() {
 
         for (size_t g = 0; g < groups.size(); g++) {
             PanelGroup& grp = groups[g];
-            bool captioned = !grp.caption.empty();
 
-            if (captioned) {
-                grp.hasDivider = true;
-                grp.dividerPos = rowTop + H_GAP * 0.5f;
-                rowTop -= capH;
-            } else {
-                grp.hasDivider = false;
-            }
+            // The rule separates one group from the one above it, so the first row
+            // does not get one.
+            grp.hasDivider = (g > 0);
+            grp.dividerPos = rowTop + H_GAP * 0.5f;
+            rowTop -= capH;
 
             float cy = rowTop - KNOB_RADIUS;
             float cx = mainX - H_GAP - cell * 0.5f;
@@ -1024,7 +1064,7 @@ void VolumeDeck::updateKnobPositions() {
 
         grp.captionX  = right - colW * 0.5f;
         grp.captionY  = topBoxY - capH + GAP_FIVE * 0.5f;
-        grp.hasDivider = !grp.caption.empty();
+        grp.hasDivider = (g > 0);
         grp.dividerPos = right + GROUP_GAP * 0.5f;
 
         right -= colW + GROUP_GAP;

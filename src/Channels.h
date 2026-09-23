@@ -21,7 +21,12 @@ enum ChannelKind {
 struct ChannelDef {
     const char* slug;       // command slug and config key ("master", "xatc_chatter")
     const char* display;    // knob label ("Master", "Chatter")
-    const char* owner;      // owning plugin, shown as the group caption; nullptr for CH_SIM
+    const char* owner;      // owning plugin, shown as the group caption
+    // XPLM plugin signature of the owner, or nullptr for X-Plane's own channels.
+    // Checked alongside the dataref: a plugin switched off in Plugin Admin may leave
+    // its datarefs registered, so the dataref alone cannot tell us the add-on is
+    // actually running. XPLMIsPluginEnabled() can.
+    const char* pluginSignature;
     const char* dataref;
     ChannelKind kind;
     // The dataref units that correspond to a knob at 0.0 and at 1.0. Everything above

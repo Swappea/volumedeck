@@ -62,7 +62,8 @@ struct VolumeKnob {
 // name, drawn small above the group; empty for the sim group.
 struct PanelGroup {
     std::vector<int> knobIndices;
-    std::string      caption;
+    std::string      caption;      // every group is captioned, X-Plane's included
+    bool             isAddonGroup;
     float            labelWidth;   // vertical layout: width reserved for the labels
     // Filled in by updateKnobPositions() so drawControlPanel() only has to draw what
     // the layout pass decided -- same rule as the knobs and the icon strip.
@@ -160,7 +161,7 @@ private:
     void setVolume(int knobIndex, float value);
     void testVolumeDecks();
     void updateVolumesForViewChange();
-    void resolveAddonDataRefs();      // deferred XPLMFindDataRef, from the flight loop
+    void refreshAddonChannels();      // add-ons appearing AND disappearing, from the flight loop
     void serviceKnobProbes();         // per-knob probe for late-discovered add-ons
     // Writes past the "do we control this channel" guard in setVolume(). ONLY for
     // putting back a value the probe itself wrote -- leaving the 0.03125 test value

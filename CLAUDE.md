@@ -125,7 +125,7 @@ A `CH_ADDON` entry in the registry names another plugin's dataref (currently onl
 
 Three rules hold this together:
 
-- **The dataref lookup is deferred, not one-shot.** Plugin load order is not guaranteed, and the add-on may be enabled in Plugin Admin mid-session, so `resolveAddonDataRefs()` retries `XPLMFindDataRef` from the flight loop until it resolves. Doing it once in the constructor looks like it works right up until someone's install loads in a different order.
+- **Availability is re-evaluated every tick, in both directions.** `refreshAddonChannels()` runs from the flight loop; an add-on can appear (load order is not guaranteed) *and* disappear (switched off in Plugin Admin mid-session). It takes two signals, and both are needed: `XPLMFindPluginBySignature` + `XPLMIsPluginEnabled` for the owning plugin, then `XPLMFindDataRef`. **The dataref alone is not enough** — a plugin disabled in Plugin Admin gets `XPluginDisable`, but whether that unregisters its datarefs is up to the plugin, so the dataref can outlive the thing that services it. That is exactly how a disabled X-ATC-Chatter went on reading "detected". Hence `ChannelDef::pluginSignature` (`SRS.X-ATC-Chatter`, read out of the shipped binary). When a channel is lost, the cached `XPLMDataRef` is dropped rather than kept — it belonged to a plugin that may since have unloaded — and `probed` is cleared so a fresh probe runs if it comes back.
 - **The global three-stage probe skips add-ons.** It runs in the first ~3 seconds, long before an add-on dataref may exist. Add-on knobs instead run `serviceKnobProbes()`, a two-tick copy that parks the real level in its own `probeStash` field — *not* in `exteriorVolume`, which is the overload that once greyed out all eight knobs (see below). If the channel is switched off mid-probe, stage 2 restores `probeStash` through `writeVolumeRaw()` before bailing, or the 0.03125 test value would be left sitting in another plugin's dataref.
 - **Config load and the add-on probe can happen in either order.** Unlike the sim channels, there is no probe-then-load guarantee. So `loadConfig()`'s `ADDON` branch applies the stored level immediately if the knob has already been probed, and leaves it to `serviceKnobProbes()` if not; and it preserves an existing `KNOB_FAILED_TEST` rather than letting the stored pair clear a verdict the probe actually reached.
 
@@ -137,7 +137,11 @@ Three rules hold this together:
 
 `SettingsWindow` is created *after* the mouse-sink window in `XPluginEnable`, so it is in front of it — both are in the floating layer and the sink spans the whole screen — and `toggle()` calls `XPLMBringWindowToFront` as well. Its click handler always returns 1: the window is opaque, and a click falling through to the sim behind it would be a surprise.
 
-Same discipline as the panel: `computeLayout()` is the single source of geometry, called by both the draw callback and the click handler, so a row's art and its hit target are the same rect. The window's height comes from `requiredHeight()`, which runs the same function against a zero origin — add a channel to the registry and the window grows to fit it.
+Channels are laid out in a **grid** — 4 columns for the sim channels, 2 for the add-ons (their cells carry owner, status and dataref) — so the list grows sideways as add-ons are added instead of pushing the window off the bottom of the screen.
+
+**Only add-ons that are actually running get a row.** One that was never installed, or whose plugin is switched off, is not a setting a user can hold an opinion about; an unchecked box for it just looks broken. With none present the section says so instead of rendering empty.
+
+Same discipline as the panel: `computeLayout()` is the single source of geometry, called by both the draw callback and the click handler, so a row's art and its hit target are the same rect. The window's height comes from `requiredHeight()`, which runs the same function against a zero origin — so it tracks the add-on section growing and shrinking. `syncHeight()` applies it when the window is opened, not from the draw callback: resizing a window out from under its own draw pass gives you a frame drawn against last frame's geometry.
 
 ### Knob model and the `exteriorVolume` sentinel
 
@@ -186,7 +190,9 @@ The header icon strip is laid out by the shared constants `ICON_SOUND_W`, `ICON_
 
 Two layouts share all of this. `LAYOUT_VERTICAL` is a column with labels in a strip to the left of each knob; `LAYOUT_HORIZONTAL` is a row with labels centred underneath. `panelWidth()`/`panelHeight()` and `updateKnobPositions()` branch on `layout`.
 
-**Groups.** `buildGroups()` splits the visible knobs into the sim group plus one group per owning add-on plugin — a column each in the vertical layout, a row each in the horizontal one, separated by a rule and captioned with the owner's name. One group per *owner*, not per knob, so a plugin exposing several channels gets one caption. `updateKnobPositions()` also computes each group's caption position and divider, so `drawControlPanel()` only draws what the layout pass decided.
+**Groups.** `buildGroups()` splits the visible knobs into the sim group plus one group per owning add-on plugin — a column each in the vertical layout, a row each in the horizontal one, separated by a rule and captioned. One group per *owner*, not per knob, so a plugin exposing several channels gets one caption. `updateKnobPositions()` also computes each group's caption position and divider, so `drawControlPanel()` only draws what the layout pass decided.
+
+**Every group is captioned, the sim group included** (`SIM_GROUP_CAPTION`, "X-Plane"). Leaving it bare made X-Plane's own bank the only one on the panel with nothing saying whose it was, which read as if the captioned add-on group were the anomaly rather than a peer. Use `PanelGroup::isAddonGroup` to tell the groups apart, never `caption.empty()`.
 
 Group membership changes rarely (a Settings toggle, an add-on appearing, the font loading and making labels measurable), and the draw callback runs at frame rate — hence `groupsDirty` rather than rebuilding the vector every frame. Anything that changes membership or measurability must set it.
 

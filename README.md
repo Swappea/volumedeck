@@ -46,10 +46,12 @@ the whole soundscape rather than just X-Plane's own mixer.
 
 How it behaves:
 
-- **Detection is continuous.** Plugin load order is not guaranteed, so VolumeDeck
-  keeps looking for the DataRef once a second rather than giving up at startup. An
-  add-on started late, or one whose plugin is enabled in Plugin Admin mid-session,
-  is picked up when it appears.
+- **Detection is continuous, both ways.** Plugin load order is not guaranteed, so
+  VolumeDeck keeps checking once a second rather than giving up at startup. An add-on
+  enabled in Plugin Admin mid-session is picked up when it appears; one that is
+  disabled or unloaded disappears from the panel and from Settings just as quickly.
+  Both the owning plugin's enabled state and its DataRef are checked, because a
+  disabled plugin can leave its DataRefs registered behind it.
 - **Nothing is written until the channel is switched on.** Open Settings to turn an
   add-on channel off and VolumeDeck stops touching that DataRef entirely - no writes
   on load, on a view change, or from a command.
