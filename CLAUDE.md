@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A C++ X-Plane plugin (`.xpl`) that draws an on-screen volume panel with 8 knobs, adjusted by mouse wheel, without pausing the sim. It is a C++ port of `B2VolumeControl.lua`; the original Lua behavior is the spec for UI layout and config semantics.
+A C++ X-Plane plugin (`.xpl`) that draws an on-screen volume panel, adjusted by mouse wheel, without pausing the sim. It covers X-Plane's own eight sound channels plus volume datarefs belonging to third-party add-ons (currently X-ATC-Chatter), each group captioned with the plugin it belongs to. It began as a C++ port of `B2VolumeControl.lua`; the original Lua behavior is still the spec for the sim knobs' UI layout and config semantics.
 
 ## Build
 
@@ -61,11 +61,14 @@ Output naming is imposed by `add_xplane_plugin()`: for SDK ≥ 300 the artifact 
 
 ## Architecture
 
-Four files, split by X-Plane SDK role:
+Split by X-Plane SDK role:
 
-- `src/main.cpp` — the SDK entry points (`XPluginStart/Enable/Disable/Stop`) and all input callbacks. On enable it creates a single full-screen, undecorated `xplm_WindowLayerFloatingWindows` window purely as a mouse/wheel sink; it draws nothing.
-- `src/VolumeDeck.h/.cpp` — a singleton (`VolumeDeck::getInstance()`) holding all UI state, the 8 knobs, config I/O, and the drawing layer built on `XPLMPanelGraphics`.
-- `src/VolumeCommands.h/.cpp` — the 27 custom X-Plane commands. Self-contained: a static binding table plus one shared handler, talking to `VolumeDeck` only through its public methods.
+- `src/Channels.h/.cpp` — **the channel registry, and the only place a channel is defined.** One `ChannelDef` per channel: slug, display name, owning plugin (null for X-Plane's own), dataref, kind, and the dataref units that map to 0.0/1.0. `VolumeDeck` builds its knobs from it and `VolumeCommands` names its commands from it, so the two lists cannot drift. `Channels::COUNT` is a compile-time constant because `VolumeCommands` sizes a static table from it; a `static_assert` keeps it in step with the table.
+- `src/main.cpp` — the SDK entry points (`XPluginStart/Enable/Disable/Stop`), the Plugins menu, and all input callbacks. On enable it creates a single full-screen, undecorated `xplm_WindowLayerFloatingWindows` window purely as a mouse/wheel sink; it draws nothing.
+- `src/VolumeDeck.h/.cpp` — a singleton (`VolumeDeck::getInstance()`) holding all UI state, the knobs, config I/O, and the drawing layer built on `XPLMPanelGraphics`.
+- `src/SettingsWindow.h/.cpp` — the Settings window, a second `XPLMCreateWindowEx` window (decorated, panel-graphics content) drawn with `VolumeDeck`'s font and palette. Not XPWidgets: widgets are legacy, draw through the OpenGL bridge and would not match the panel.
+- `src/Palette.h` — the shared colours. `const` arrays at namespace scope, so each TU gets its own internal-linkage copy and including it twice is fine.
+- `src/VolumeCommands.h/.cpp` — the custom X-Plane commands. Self-contained: a static binding table plus one shared handler, talking to `VolumeDeck` only through its public methods.
 - `src/main.cpp` and `VolumeDeck` are coupled through the small public surface on the class (`toggleControlBox`, `adjustKnobVolume`, `isMouseOverKnobPublic`, `isOver*Icon`, drag methods). `main.cpp` does **no coordinate arithmetic** — every hit test lives on `VolumeDeck` beside the code that draws the thing, so art and click target cannot drift apart. Adding a clickable element means a draw call plus an `isOverX()` method, then one call in `MouseClickHandler`.
 
 ### Two callbacks, different jobs
@@ -75,11 +78,15 @@ Four files, split by X-Plane SDK role:
 
 ### Commands
 
-27 commands named `volumedeck/<channel>/{up,down,mute_toggle}` plus `volumedeck/panel/{toggle,save,layout_toggle}`. Channel slugs must stay in step with `knobNames[]` in `VolumeDeck.cpp` and `CHANNELS[]` in `VolumeCommands.cpp` — they are two hand-maintained lists of the same eight strings.
+`Channels::COUNT * 3 + 3` commands: `volumedeck/<slug>/{up,down,mute_toggle}` per channel plus `volumedeck/panel/{toggle,save,layout_toggle}`. Slugs come from `Channels::DEFS`, which is also what builds the knobs — the two hand-maintained lists this used to have are gone.
+
+**Never reorder or delete a registry entry; append only.** A channel's index is what the command table binds to and what the per-aircraft config line positions by. A channel keeps its slot even when its dataref is missing or the user has switched it off, which is what makes an index safe to hold onto.
+
+Commands for a channel that is unavailable (add-on not installed) or switched off are created and stay bindable, but the handler returns early — `isChannelControllable()`. A binding that silently disappears when you uninstall an add-on would be worse than one that does nothing.
 
 Lifecycle is split deliberately, per the note in `XPLMUtilities.h:555` that commands outlive the plugin that created them: `create()` in `XPluginStart` (so they reach the binding UI and web API even before enable), `registerHandlers()` in `XPluginEnable`, `unregisterHandlers()` in `XPluginDisable`. Skipping the unregister leaves a dangling handler across a plugin reload.
 
-One handler serves all 27; the refcon is a `CmdBinding*` into a static table, which also stores each command's own repeat deadline. Two timing rules matter:
+One handler serves them all; the refcon is a `CmdBinding*` into a static table, which also stores each command's own repeat deadline. Two timing rules matter:
 
 - `xplm_CommandContinue` fires *every frame*, so `CMD_ADJUST` throttles to `REPEAT_INTERVAL` (0.1s) via `XPLMGetElapsedTime()`. `Begin` always steps once immediately so a tap stays responsive.
 - Every handler returns early while `isReady()` is false, i.e. during the ~3s startup probe, which would otherwise overwrite whatever the command just set.
@@ -111,6 +118,27 @@ knob.
 Text uses `Roboto-Regular.ttf` from X-Plane's own `Resources/fonts` via `XPLMGetSystemPath`,
 so nothing is bundled. `VolumeKnob::displayName` holds the capitalised label (`ui` becomes
 `UI`, not `Ui`); `name` stays lowercase because it is the command-slug identity.
+
+### Third-party add-on channels
+
+A `CH_ADDON` entry in the registry names another plugin's dataref (currently only `SRS/X-ATC-Chatter/chatter_volume`, verified against X-Plane 12.4.4: float, 0..1, writable, and not re-asserted on the next frame).
+
+Three rules hold this together:
+
+- **The dataref lookup is deferred, not one-shot.** Plugin load order is not guaranteed, and the add-on may be enabled in Plugin Admin mid-session, so `resolveAddonDataRefs()` retries `XPLMFindDataRef` from the flight loop until it resolves. Doing it once in the constructor looks like it works right up until someone's install loads in a different order.
+- **The global three-stage probe skips add-ons.** It runs in the first ~3 seconds, long before an add-on dataref may exist. Add-on knobs instead run `serviceKnobProbes()`, a two-tick copy that parks the real level in its own `probeStash` field — *not* in `exteriorVolume`, which is the overload that once greyed out all eight knobs (see below). If the channel is switched off mid-probe, stage 2 restores `probeStash` through `writeVolumeRaw()` before bailing, or the 0.03125 test value would be left sitting in another plugin's dataref.
+- **Config load and the add-on probe can happen in either order.** Unlike the sim channels, there is no probe-then-load guarantee. So `loadConfig()`'s `ADDON` branch applies the stored level immediately if the knob has already been probed, and leaves it to `serviceKnobProbes()` if not; and it preserves an existing `KNOB_FAILED_TEST` rather than letting the stored pair clear a verdict the probe actually reached.
+
+`setVolume()` refuses to write an add-on channel the user has switched off — that dataref belongs to somebody else. `writeVolumeRaw()` is the deliberate bypass, and exists only so the probe can put back what it wrote. Note the asymmetry the settings window relies on: `isChannelDrawable()` (on the panel) vs `isChannelControllable()` (may we write it). Hiding a **sim** channel is a panel preference and its commands keep working; switching an **add-on** off stops the writes too.
+
+### Settings window and menu
+
+`Plugins > VolumeDeck` has Settings, Show / Hide Panel, Save Now, and a deliberately disabled item stating the two save scopes. The menu is created in `XPluginStart` and destroyed in `XPluginStop`.
+
+`SettingsWindow` is created *after* the mouse-sink window in `XPluginEnable`, so it is in front of it — both are in the floating layer and the sink spans the whole screen — and `toggle()` calls `XPLMBringWindowToFront` as well. Its click handler always returns 1: the window is opaque, and a click falling through to the sim behind it would be a surprise.
+
+Same discipline as the panel: `computeLayout()` is the single source of geometry, called by both the draw callback and the click handler, so a row's art and its hit target are the same rect. The window's height comes from `requiredHeight()`, which runs the same function against a zero origin — add a channel to the registry and the window grows to fit it.
+
 ### Knob model and the `exteriorVolume` sentinel
 
 Each `VolumeKnob` wraps one `sim/operation/sound/*_volume_ratio` dataref. `exteriorVolume` is overloaded and is the central piece of state to understand before touching volume logic:
@@ -128,7 +156,13 @@ Two invariants hold this together; breaking either greys out all eight knobs:
 
 ### Config file
 
-`X-Plane 12/Output/preferences/VolumeDeck.dat`, a line-oriented text format: `VERSION <n>`, an optional `X:<x> Y:<y>` panel position, then one line per aircraft — the `.acf` filename followed by 8 `interior exterior` float pairs. Save rewrites the whole file, preserving other aircraft's lines. `FILE_FORMAT_VERSION` is 2; a loaded file with version ≤ 1 leaves `saveRequired` set so the entry is rewritten in the current format. Saving is manual — the user clicks the floppy icon or runs `volumedeck/panel/save`.
+`X-Plane 12/Output/preferences/VolumeDeck.dat`, a line-oriented text format: `VERSION <n>`, an optional `X:<x> Y:<y>` panel position, `LAYOUT <0|1>`, a `CHANNEL <slug> <0|1>` line per channel, an `ADDON <slug> <interior> <exterior>` line per add-on, then one line per aircraft — the `.acf` filename followed by `interior exterior` float pairs **for the sim channels only**. Save rewrites the whole file, preserving other aircraft's lines. `FILE_FORMAT_VERSION` is 3; a loaded file older than that leaves `saveRequired` set so the entry is rewritten in the current format. Saving is manual — the user clicks the floppy icon, uses *Save now* in Settings, or runs `volumedeck/panel/save`.
+
+**Two storage scopes, deliberately.** Sim channels are per aircraft; add-on levels are global, because chatter volume is a property of the add-on rather than of the aeroplane. The disabled menu item exists to say so before a user discovers it the hard way.
+
+`CHANNEL` and `ADDON` are global lines rewritten from live state on every save, so they need no preservation pass — but both are parsed **before** the `.acf` test, which would otherwise claim any line that happens to mention an aircraft file, and both are skipped in the copy-other-aircraft loop so they are not duplicated. An `ADDON` line whose slug this build does not know is dropped rather than preserved; that is the accepted cost of rewriting from state.
+
+A v2 file still loads: its 8 pairs land on the 8 sim channels, which are the first 8 registry entries. This is the reason the registry is append-only.
 
 `loadConfig()` falls back to `getLegacyConfigPath()` (`VolumeControl.dat`) when
 `VolumeDeck.dat` does not exist, so settings survive the rename from the plugin this
@@ -150,9 +184,15 @@ The header icon strip is laid out by the shared constants `ICON_SOUND_W`, `ICON_
 
 `autoPosition` snaps the panel to the top-right corner and follows screen-size changes; dragging clears it, and dragging back near the corner restores it.
 
-Two layouts share all of this. `LAYOUT_VERTICAL` is a column with labels in a strip to the left of each knob; `LAYOUT_HORIZONTAL` is a row with labels centred underneath. `panelWidth()`/`panelHeight()` and `updateKnobPositions()` branch on `layout`, and `isMouseOverKnob()` only includes the label strip in the vertical case.
+Two layouts share all of this. `LAYOUT_VERTICAL` is a column with labels in a strip to the left of each knob; `LAYOUT_HORIZONTAL` is a row with labels centred underneath. `panelWidth()`/`panelHeight()` and `updateKnobPositions()` branch on `layout`.
 
-Row cells are sized by `horizontalCell()`, which measures all eight labels with `XPLMFontMeasureString` and takes the widest. Do not replace it with a fixed pitch: a constant narrower than the widest label makes adjacent labels collide ("InteriorExteriorMaster").
+**Groups.** `buildGroups()` splits the visible knobs into the sim group plus one group per owning add-on plugin — a column each in the vertical layout, a row each in the horizontal one, separated by a rule and captioned with the owner's name. One group per *owner*, not per knob, so a plugin exposing several channels gets one caption. `updateKnobPositions()` also computes each group's caption position and divider, so `drawControlPanel()` only draws what the layout pass decided.
+
+Group membership changes rarely (a Settings toggle, an add-on appearing, the font loading and making labels measurable), and the draw callback runs at frame rate — hence `groupsDirty` rather than rebuilding the vector every frame. Anything that changes membership or measurability must set it.
+
+`isMouseOverKnob()` uses the per-knob `hitPadLeft` the layout pass stored, not a panel-wide constant: each column sizes its own label strip, so a single `FIXED_TEXT_SPACE` would make one column's targets overlap the next.
+
+Row cells are sized by `horizontalCell()`, which measures every visible label and takes the widest. Do not replace it with a fixed pitch: a constant narrower than the widest label makes adjacent labels collide ("InteriorExteriorMaster"). It measures through `measureText()`, which falls back to a rough estimate while the font is still loading so an early layout pass does not collapse every column to zero width.
 
 ## Releases
 
@@ -190,6 +230,7 @@ Publish first, then `gh release edit <tag> --latest` if the badge has not moved.
 - Every callback body is wrapped in `try { ... } catch (...)` that logs and swallows. An exception escaping into X-Plane's callback would take down the sim, so keep this pattern for any new callback.
 - Log with `XPLMDebugString` using the existing `VolumeDeck: [TAG]` prefixes (`[INIT]`, `[LOOP]`, `[CONFIG]`, `[ENABLE]`, `[ERROR]`) — this is the only debugging channel.
 - Drawing goes through `XPLMPanelGraphics` via the helpers on the class (`drawFilledCircle`, `drawArc`, …). There is no global colour or line-width state as there was in GL, so `setColor()`/`setLineWidth()` stash values that each primitive passes along.
+- `VolumeDeck::drawText()` / `measureText()` are the one text path, shared with the settings window. `drawString()` is the knob-label shorthand on top of them.
 - **Never create or destroy a panel-graphics resource inside the draw callback.** `XPLMCreateFont` there is a hard runtime violation that takes the sim down with "Never call this function from within a panel draw callback" — it is not documented in the headers or the SDK docs tree, only enforced at runtime. The font is built in `initialize()` and retried from the flight loop; `drawString()` skips text when it is missing rather than creating one.
 - `CMakeLists.txt` globs `src/*.cpp`, so new source files need no build edits, but a fresh CMake configure.
 - **`XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1)` sits under `#if APL` in `XPluginStart` and must stay ahead of any path call.** Without it macOS returns HFS paths (`Macintosh HD:Users:…`); handing one back to X-Plane (e.g. `XPLMFontAddFace`) is fatal, not an error return — it downs the sim and blames the plugin. Deliberately not enabled on Windows/Linux: Linux is identical either way, and Windows would switch to `C:/…`, changing builds that work today.

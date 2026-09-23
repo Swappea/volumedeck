@@ -1,14 +1,31 @@
 #include "VolumeDeck.h"
 #include "VolumeCommands.h"
+#include "SettingsWindow.h"
 #include "XPLMDisplay.h"
 #include "XPLMUtilities.h"
 #include "XPLMPlugin.h"
+#include "XPLMMenus.h"
 #include "XPLMDefs.h"
 #include <cstring>
+#include <cstdint>   // intptr_t, for the menu item refcons
 
 // Mouse callback state
 static XPLMWindowID g_window = nullptr;
 static bool g_mouseInWindow = false;
+
+// Plugins menu
+static XPLMMenuID g_menu = nullptr;
+static int        g_menuItem = -1;
+
+enum MenuAction {
+    MENU_SETTINGS = 0,
+    MENU_TOGGLE_PANEL,
+    MENU_SAVE
+};
+
+static void MenuHandler(void* inMenuRef, void* inItemRef);
+static void CreateMenu();
+static void DestroyMenu();
 
 // Mouse callback functions
 int MouseClickHandler(XPLMWindowID inWindowID, int x, int y, int inMouse, void* inRefcon);
@@ -47,12 +64,70 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     // plugin, and creating them early makes them visible to the joystick/keyboard
     // binding UI and the web API regardless of enable state.
     VolumeCommands::create();
-    
+
+    CreateMenu();
+
     return 1;
+}
+
+// Plugins > VolumeDeck. The note item is deliberately disabled: it is a label, not a
+// command, and it answers the question the two save scopes would otherwise raise
+// every time somebody changes an add-on level and then switches aircraft.
+static void CreateMenu() {
+    if (g_menu != nullptr) return;
+
+    g_menuItem = XPLMAppendMenuItem(XPLMFindPluginsMenu(), "VolumeDeck", nullptr, 0);
+    if (g_menuItem < 0) {
+        XPLMDebugString("VolumeDeck: [ERROR] Could not append plugins menu item\n");
+        return;
+    }
+
+    g_menu = XPLMCreateMenu("VolumeDeck", XPLMFindPluginsMenu(), g_menuItem,
+                            MenuHandler, nullptr);
+    if (g_menu == nullptr) {
+        XPLMDebugString("VolumeDeck: [ERROR] Could not create plugins menu\n");
+        return;
+    }
+
+    XPLMAppendMenuItem(g_menu, "Settings...", (void*)MENU_SETTINGS, 0);
+    XPLMAppendMenuItem(g_menu, "Show / Hide Panel", (void*)MENU_TOGGLE_PANEL, 0);
+    XPLMAppendMenuSeparator(g_menu);
+    XPLMAppendMenuItem(g_menu, "Save Now", (void*)MENU_SAVE, 0);
+
+    int note = XPLMAppendMenuItem(
+        g_menu, "Saves X-Plane levels for this aircraft, add-on levels globally",
+        nullptr, 0);
+    if (note >= 0) XPLMEnableMenuItem(g_menu, note, 0);
+
+    XPLMDebugString("VolumeDeck: [INIT] Plugins menu created\n");
+}
+
+static void DestroyMenu() {
+    if (g_menu != nullptr) {
+        XPLMDestroyMenu(g_menu);
+        g_menu = nullptr;
+    }
+    if (g_menuItem >= 0) {
+        XPLMRemoveMenuItem(XPLMFindPluginsMenu(), g_menuItem);
+        g_menuItem = -1;
+    }
+}
+
+static void MenuHandler(void* /*inMenuRef*/, void* inItemRef) {
+    try {
+        switch ((MenuAction)(intptr_t)inItemRef) {
+            case MENU_SETTINGS:      SettingsWindow::toggle(); break;
+            case MENU_TOGGLE_PANEL:  VolumeDeck::getInstance()->toggleControlBox(); break;
+            case MENU_SAVE:          VolumeDeck::getInstance()->saveConfig(); break;
+        }
+    } catch (...) {
+        XPLMDebugString("VolumeDeck: [ERROR] Exception in MenuHandler!\n");
+    }
 }
 
 PLUGIN_API void XPluginStop(void) {
     XPLMDebugString("VolumeDeck: Plugin stopping...\n");
+    DestroyMenu();
     VolumeDeck::getInstance()->shutdown();
 }
 
@@ -106,7 +181,11 @@ PLUGIN_API int XPluginEnable(void) {
         }
         
         VolumeCommands::registerHandlers();
-        
+
+        // After the sink window, so it is created in front of it -- both live in the
+        // floating layer, and the sink spans the whole screen.
+        SettingsWindow::create();
+
         XPLMDebugString("VolumeDeck: [ENABLE] Plugin enabled successfully\n");
     } catch (...) {
         XPLMDebugString("VolumeDeck: [ERROR] Exception during plugin enable!\n");
@@ -120,7 +199,9 @@ PLUGIN_API void XPluginDisable(void) {
     XPLMDebugString("VolumeDeck: Plugin disabled\n");
     
     VolumeCommands::unregisterHandlers();
-    
+
+    SettingsWindow::destroy();
+
     if (g_window) {
         XPLMDestroyWindow(g_window);
         g_window = nullptr;
@@ -188,7 +269,7 @@ int MouseClickHandler(XPLMWindowID inWindowID, int x, int y, int inMouse, void* 
             }
             
             if (vc->isControlBoxVisible()) {
-                for (int i = 0; i < 8; i++) {
+                for (int i = 0; i < vc->channelCount(); i++) {
                     if (vc->isMouseOverKnobPublic(i, x, y)) {
                         vc->toggleKnobMode(i);
                         return 1;
@@ -230,7 +311,7 @@ int MouseWheelHandler(XPLMWindowID inWindowID, int x, int y, int wheel, int clic
         // No outer bounding box here: isMouseOverKnob() already bounds-checks each
         // knob, and a second hand-derived copy of the panel geometry only creates a
         // way for the two to disagree.
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < vc->channelCount(); i++) {
             if (vc->isMouseOverKnobPublic(i, x, y)) {
                 vc->adjustKnobVolume(i, clicks);
                 return 1;

@@ -1,5 +1,6 @@
 #include "VolumeCommands.h"
 #include "VolumeDeck.h"
+#include "Channels.h"
 #include "XPLMUtilities.h"
 #include "XPLMProcessing.h"
 #include <cstdio>
@@ -24,13 +25,12 @@ struct CmdBinding {
     float          nextRepeatTime;  // XPLMGetElapsedTime() deadline for the next repeat
 };
 
-// Must match knobNames[] in VolumeDeck.cpp -- these become the command names.
-const char* const CHANNELS[] = {
-    "master", "exterior", "interior", "pilot", "copilot", "radio", "enviro", "ui"
-};
-const int NUM_CHANNELS = 8;
+// Command names come straight from the channel registry in Channels.h, which is
+// also what builds the knobs -- so a slug cannot be renamed on one side only and
+// silently break somebody's keybinding.
+const int NUM_CHANNELS = Channels::COUNT;
 
-// up + down + mute_toggle per channel, plus panel/toggle and panel/save.
+// up + down + mute_toggle per channel, plus panel/toggle, save and layout_toggle.
 const int NUM_COMMANDS = NUM_CHANNELS * 3 + 3;
 
 // xplm_CommandContinue fires every frame; at 60fps an unthrottled 0.02 step would
@@ -62,16 +62,26 @@ void buildTable() {
     char desc[96];
 
     for (int c = 0; c < NUM_CHANNELS; c++) {
-        snprintf(name, sizeof(name), "volumedeck/%s/up", CHANNELS[c]);
-        snprintf(desc, sizeof(desc), "VolumeDeck: %s volume up", CHANNELS[c]);
+        const ChannelDef& def = Channels::get(c);
+        // Third-party channels say whose they are, so the binding UI does not just
+        // show a bare "Chatter" among X-Plane's own mixer channels.
+        char what[64];
+        if (def.owner != nullptr) {
+            snprintf(what, sizeof(what), "%s %s", def.owner, def.display);
+        } else {
+            snprintf(what, sizeof(what), "%s", def.display);
+        }
+
+        snprintf(name, sizeof(name), "volumedeck/%s/up", def.slug);
+        snprintf(desc, sizeof(desc), "VolumeDeck: %s volume up", what);
         addCommand(n, name, desc, CMD_ADJUST, c, 1);
 
-        snprintf(name, sizeof(name), "volumedeck/%s/down", CHANNELS[c]);
-        snprintf(desc, sizeof(desc), "VolumeDeck: %s volume down", CHANNELS[c]);
+        snprintf(name, sizeof(name), "volumedeck/%s/down", def.slug);
+        snprintf(desc, sizeof(desc), "VolumeDeck: %s volume down", what);
         addCommand(n, name, desc, CMD_ADJUST, c, -1);
 
-        snprintf(name, sizeof(name), "volumedeck/%s/mute_toggle", CHANNELS[c]);
-        snprintf(desc, sizeof(desc), "VolumeDeck: mute/unmute %s", CHANNELS[c]);
+        snprintf(name, sizeof(name), "volumedeck/%s/mute_toggle", def.slug);
+        snprintf(desc, sizeof(desc), "VolumeDeck: mute/unmute %s", what);
         addCommand(n, name, desc, CMD_MUTE, c, 0);
     }
 
@@ -93,6 +103,12 @@ int commandHandler(XPLMCommandRef /*inCommand*/, XPLMCommandPhase inPhase, void*
         // The startup probe spends its first few seconds writing and restoring every
         // channel; anything we did here would be overwritten by it.
         if (!vc->isReady()) return 1;
+
+        // A channel whose dataref never turned up (add-on not installed), or one the
+        // user has told us not to control, accepts no volume commands. The command
+        // still exists and stays bindable -- it just does nothing, which is the only
+        // honest answer when there is no dataref behind it.
+        if (b->knob >= 0 && !vc->isChannelControllable(b->knob)) return 1;
 
         switch (b->kind) {
             case CMD_PANEL_TOGGLE:
@@ -153,7 +169,7 @@ void VolumeCommands::create() {
 
     g_created = true;
 
-    char msg[128];
+    char msg[160];
     snprintf(msg, sizeof(msg), "VolumeDeck: [CMD] Created %d commands (%d failed)\n",
              NUM_COMMANDS - failed, failed);
     XPLMDebugString(msg);
