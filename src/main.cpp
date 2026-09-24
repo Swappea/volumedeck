@@ -25,9 +25,13 @@ enum MenuAction {
     MENU_SAVE
 };
 
+// Named CreatePluginMenu/DestroyPluginMenu, not CreateMenu/DestroyMenu: both of
+// those are Win32 API functions in winuser.h, which MinGW pulls in through the XPLM
+// headers. A file-static declaration of either collides with the Win32 one and fails
+// the Windows build only -- macOS and Linux compile it happily.
 static void MenuHandler(void* inMenuRef, void* inItemRef);
-static void CreateMenu();
-static void DestroyMenu();
+static void CreatePluginMenu();
+static void DestroyPluginMenu();
 
 // Mouse callback functions
 int MouseClickHandler(XPLMWindowID inWindowID, int x, int y, int inMouse, void* inRefcon);
@@ -67,7 +71,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     // binding UI and the web API regardless of enable state.
     VolumeCommands::create();
 
-    CreateMenu();
+    CreatePluginMenu();
 
     return 1;
 }
@@ -75,7 +79,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 // Plugins > VolumeDeck. The note item is deliberately disabled: it is a label, not a
 // command, and it answers the question the two save scopes would otherwise raise
 // every time somebody changes an add-on level and then switches aircraft.
-static void CreateMenu() {
+static void CreatePluginMenu() {
     if (g_menu != nullptr) return;
 
     g_menuItem = XPLMAppendMenuItem(XPLMFindPluginsMenu(), "VolumeDeck", nullptr, 0);
@@ -104,7 +108,7 @@ static void CreateMenu() {
     XPLMDebugString("VolumeDeck: [INIT] Plugins menu created\n");
 }
 
-static void DestroyMenu() {
+static void DestroyPluginMenu() {
     if (g_menu != nullptr) {
         XPLMDestroyMenu(g_menu);
         g_menu = nullptr;
@@ -140,7 +144,7 @@ static void MenuHandler(void* /*inMenuRef*/, void* inItemRef) {
 
 PLUGIN_API void XPluginStop(void) {
     XPLMDebugString("VolumeDeck: Plugin stopping...\n");
-    DestroyMenu();
+    DestroyPluginMenu();
     VolumeDeck::getInstance()->shutdown();
 }
 

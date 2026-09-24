@@ -227,8 +227,16 @@ is deliberately no tag trigger. Run it from the Actions tab:
   written by hand.
 
 Jobs build Linux and Windows (MinGW cross, matching `toolchain-win.cmake`) on Ubuntu, and
-a universal macOS binary on macos-latest. The macOS job is `continue-on-error` because no
-human has ever run that binary in the sim.
+a universal macOS binary on macos-latest. All three must pass — macOS was
+`continue-on-error` while nobody had run that binary in the sim, but development and
+in-sim testing happen on macOS now, and a silently-missing macOS build in the zip is
+worse than a red run.
+
+**Windows is the only job that catches name collisions with the Win32 API.** MinGW pulls
+`windows.h` in through the XPLM headers, so a file-static helper named after a Win32
+function fails there and only there — `CreateMenu` and `DestroyMenu` (both in
+`winuser.h`) each cost a release build. macOS and Linux compile them happily. Prefix
+anything menu-, window- or file-shaped rather than finding out from CI.
 
 `.github/fetch-sdk.sh` downloads the SDK per job, since it cannot be vendored (see
 `LICENSE`), and fails early if the SDK predates XPLM440 rather than dying mid-compile.
