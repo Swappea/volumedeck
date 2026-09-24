@@ -42,7 +42,12 @@ namespace Channels {
 // static_assert in Channels.cpp keeps it honest against DEFS[].
 const int COUNT = 9;
 
-extern const ChannelDef DEFS[COUNT];
+// Deliberately declared WITHOUT a bound. Given the bound here, the static_assert in
+// Channels.cpp would be checking sizeof against the very number it was told, and a
+// COUNT bumped without adding the row would compile into a zero-filled entry -- whose
+// null slug then reaches strcmp() and std::string at startup. Unsized, the definition
+// completes the type from its initialisers and the assert can actually fail.
+extern const ChannelDef DEFS[];
 
 inline const ChannelDef& get(int index) { return DEFS[index]; }
 

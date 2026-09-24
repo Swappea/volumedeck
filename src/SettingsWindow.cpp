@@ -178,9 +178,18 @@ void sectionHeader(VolumeDeck* vd, float left, float right, float baselineY, con
     drawLine(Palette::DIVIDER, 1.0f, from, rule, right - PAD, rule);
 }
 
+void syncHeight(XPLMWindowID id);   // defined below, next to requiredHeight()
+
 void drawWindow(XPLMWindowID id, void* /*refcon*/) {
     try {
         VolumeDeck* vd = VolumeDeck::getInstance();
+
+        // Before reading the geometry, not after: the add-on section grows the moment
+        // a plugin is detected, and this window can be open when that happens. Without
+        // this the note line and the Save button fall below the bottom edge and become
+        // invisible AND unclickable -- clicks outside the window never reach us -- until
+        // it is closed and reopened.
+        syncHeight(id);
 
         int l, t, r, b;
         XPLMGetWindowGeometry(id, &l, &t, &r, &b);
@@ -282,7 +291,9 @@ int handleClick(XPLMWindowID id, int x, int y, int mouse, void* /*refcon*/) {
         computeLayout((float)l, (float)t, (float)r, lay);
 
         if (x >= lay.saveL && x <= lay.saveR && y <= lay.saveT && y >= lay.saveB) {
-            vd->saveConfig();
+            // Same guard the command handlers and the menu apply: during the startup
+            // probe the knobs hold probe scratch rather than the user's levels.
+            if (vd->isReady()) vd->saveConfig();
             return 1;
         }
 

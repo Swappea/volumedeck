@@ -588,6 +588,12 @@ bool VolumeDeck::isChannelEnabled(int index) const {
 
 bool VolumeDeck::isChannelDrawable(int index) const {
     if (index < 0 || index >= NUM_KNOBS) return false;
+    // An add-on with no owner name has no group to live in, so buildGroups() skips
+    // it and it is never positioned. Saying it is drawable anyway would leave
+    // isMouseOverKnob() testing against the constructor's x/y of (0,0) -- a wheel in
+    // the bottom-left corner of the screen adjusting an invisible channel. The two
+    // must agree; the registry is expected to give every CH_ADDON an owner.
+    if (knobs[index].isAddon && knobs[index].ownerName.empty()) return false;
     return knobs[index].available && knobs[index].enabled;
 }
 
@@ -616,12 +622,10 @@ void VolumeDeck::setChannelEnabled(int index, bool on) {
              knob.name.c_str(), on ? "enabled" : "disabled");
     XPLMDebugString(msg);
 
-    // Switching an add-on on for the first time is the moment we are allowed to touch
-    // its dataref, so that is when its writability probe runs.
-    if (on && knob.isAddon && knob.available && knob.exteriorVolume == KNOB_SINGLE_MARK
-            && knob.probeStage == 0 && !knob.probed) {
-        knob.probeStage = 1;
-    }
+    // Switching an add-on on is the moment we are allowed to touch its dataref, and
+    // serviceKnobProbes() picks that up from state on the next tick. It is not done
+    // here: the old condition also required exteriorVolume == KNOB_SINGLE_MARK, which
+    // a stored split-mode value quietly breaks.
 }
 
 // Third-party channels come and go at runtime, in both directions: the owning plugin
@@ -682,7 +686,7 @@ void VolumeDeck::refreshAddonChannels() {
                  knob.enabled ? "controlling" : "not controlling (off in Settings)");
         XPLMDebugString(msg);
 
-        if (knob.enabled && !knob.probed) knob.probeStage = 1;
+        // Arming is serviceKnobProbes()' job, from state -- see the note there.
     }
 }
 
@@ -692,6 +696,26 @@ void VolumeDeck::refreshAddonChannels() {
 // updateVolumesForViewChange() write it back over the test value and lock every knob.
 void VolumeDeck::serviceKnobProbes() {
     const float testValue = 0.03125f;
+
+    // Arm anything we are allowed to drive and have not measured yet. Driven by
+    // state rather than by an availability transition: an add-on that was already
+    // running when this singleton was constructed never has one -- the constructor
+    // resolved its dataref, so refreshAddonChannels() sees no change and arms
+    // nothing, and the knob stays unprobed forever. That left loadConfig()'s
+    // `probed` gate permanently shut, so the saved level was never applied and the
+    // next sync quietly overwrote it with whatever the add-on happened to be at.
+    //
+    // Gated on isReady() so a saved "CHANNEL <slug> 0" -- read at stage 3, after
+    // this would otherwise have fired -- is honoured before we write to somebody
+    // else's dataref.
+    if (isReady()) {
+        for (int i = 0; i < NUM_KNOBS; i++) {
+            VolumeKnob& knob = knobs[i];
+            if (!knob.isAddon || knob.probed || knob.probeStage != 0) continue;
+            if (!knob.available || !knob.enabled) continue;
+            knob.probeStage = 1;
+        }
+    }
 
     for (int i = 0; i < NUM_KNOBS; i++) {
         VolumeKnob& knob = knobs[i];
@@ -1513,9 +1537,13 @@ void VolumeDeck::saveConfig() {
 
     for (int i = 0; i < NUM_KNOBS; i++) {
         if (!knobs[i].isAddon) continue;
-        // Keep a level we loaded but could not apply (add-on not running this
-        // session) rather than dropping the user's setting on the floor.
-        if (!knobs[i].available && !knobs[i].hasStoredValue) continue;
+        // Only persist a level we actually measured or loaded. An add-on that is
+        // present but switched off is never probed and never synced, so it still
+        // holds the constructor default of 1.0 -- writing that out means re-enabling
+        // the channel later slams the add-on to 100%. A loaded-but-unapplied level
+        // (add-on not running this session) is still kept, rather than dropping the
+        // user's setting on the floor.
+        if (!knobs[i].probed && !knobs[i].hasStoredValue) continue;
 
         float ext = knobs[i].exteriorVolume;
         if (ext == KNOB_FAILED_TEST) ext = KNOB_SINGLE_MARK;

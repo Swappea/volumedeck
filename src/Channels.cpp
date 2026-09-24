@@ -3,7 +3,7 @@
 
 namespace Channels {
 
-const ChannelDef DEFS[COUNT] = {
+const ChannelDef DEFS[] = {
     // X-Plane's own channels. These exist from the moment the sim is up.
     { "master",   "Master",   nullptr, nullptr, "sim/operation/sound/master_volume_ratio",   CH_SIM, 0.0f, 1.0f },
     { "exterior", "Exterior", nullptr, nullptr, "sim/operation/sound/exterior_volume_ratio", CH_SIM, 0.0f, 1.0f },

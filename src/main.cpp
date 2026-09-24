@@ -13,9 +13,11 @@
 static XPLMWindowID g_window = nullptr;
 static bool g_mouseInWindow = false;
 
-// Plugins menu
+// Plugins menu. It is created in XPluginStart and destroyed in XPluginStop, so it
+// stays clickable while the plugin is disabled in Plugin Admin -- hence g_enabled.
 static XPLMMenuID g_menu = nullptr;
 static int        g_menuItem = -1;
+static bool       g_enabled = false;
 
 enum MenuAction {
     MENU_SETTINGS = 0,
@@ -115,10 +117,21 @@ static void DestroyMenu() {
 
 static void MenuHandler(void* /*inMenuRef*/, void* inItemRef) {
     try {
+        // The menu outlives XPluginEnable. Acting while disabled would construct the
+        // singleton on demand and operate on state that has never been initialised.
+        if (!g_enabled) return;
+
+        VolumeDeck* vc = VolumeDeck::getInstance();
+
         switch ((MenuAction)(intptr_t)inItemRef) {
             case MENU_SETTINGS:      SettingsWindow::toggle(); break;
-            case MENU_TOGGLE_PANEL:  VolumeDeck::getInstance()->toggleControlBox(); break;
-            case MENU_SAVE:          VolumeDeck::getInstance()->saveConfig(); break;
+            case MENU_TOGGLE_PANEL:  vc->toggleControlBox(); break;
+            case MENU_SAVE:
+                // Same guard the command handlers apply: during the ~3s startup probe
+                // the knobs hold probe scratch, not the user's levels, and saving then
+                // writes that scratch over their real config.
+                if (vc->isReady()) vc->saveConfig();
+                break;
         }
     } catch (...) {
         XPLMDebugString("VolumeDeck: [ERROR] Exception in MenuHandler!\n");
@@ -186,6 +199,8 @@ PLUGIN_API int XPluginEnable(void) {
         // floating layer, and the sink spans the whole screen.
         SettingsWindow::create();
 
+        g_enabled = true;
+
         XPLMDebugString("VolumeDeck: [ENABLE] Plugin enabled successfully\n");
     } catch (...) {
         XPLMDebugString("VolumeDeck: [ERROR] Exception during plugin enable!\n");
@@ -198,6 +213,8 @@ PLUGIN_API int XPluginEnable(void) {
 PLUGIN_API void XPluginDisable(void) {
     XPLMDebugString("VolumeDeck: Plugin disabled\n");
     
+    g_enabled = false;
+
     VolumeCommands::unregisterHandlers();
 
     SettingsWindow::destroy();
