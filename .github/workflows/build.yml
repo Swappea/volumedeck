@@ -82,10 +82,12 @@ jobs:
           if-no-files-found: error
 
   macos:
-    # Native universal build. Never verified in the sim by a human - see README.
-    # Allowed to fail so an untested toolchain cannot block a build.
+    # Native universal build. This is now a first-class platform - development and
+    # in-sim testing happen on macOS - so a failure here fails the build like any
+    # other. It was previously continue-on-error on the grounds that no human had
+    # ever run the binary in the sim; that has not been true for a while, and a
+    # silently-missing macOS build in the zip is worse than a red run.
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Fetch X-Plane SDK
@@ -106,7 +108,10 @@ jobs:
 
   package:
     needs: [linux, windows, macos]
-    if: always() && needs.linux.result == 'success' && needs.windows.result == 'success'
+    # All three, now that macOS is a supported platform rather than a best effort.
+    # Without macos here, dropping its continue-on-error would only turn the run red
+    # while still shipping a zip that silently has no macOS build in it.
+    if: always() && needs.linux.result == 'success' && needs.windows.result == 'success' && needs.macos.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
