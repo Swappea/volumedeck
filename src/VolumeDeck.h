@@ -3,6 +3,7 @@
 
 #include "XPLMDataAccess.h"
 #include "XPLMDisplay.h"
+#include "XPLMProcessing.h"   // XPLMFlightLoopID, owned as a member
 #include "Channels.h"
 #include <string>
 #include <vector>
@@ -77,8 +78,9 @@ public:
     static const int CIRCLE_SEGMENTS = 64;   // used by the arc helpers
     static VolumeDeck* getInstance();
 
-    void initialize();
-    void shutdown();
+    void initialize();    // XPluginEnable -- runs again on every re-enable
+    void disable();       // XPluginDisable
+    void shutdown();      // XPluginStop
 
     // Callbacks
     static float flightLoopCallback(float elapsedSinceLastCall, float elapsedTimeSinceLastFlightLoop,
@@ -163,6 +165,7 @@ private:
     void updateVolumesForViewChange();
     void refreshAddonChannels();      // add-ons appearing AND disappearing, from the flight loop
     void serviceKnobProbes();         // per-knob probe for late-discovered add-ons
+    void abortPendingProbes();        // restore anything a probe has written, then stand down
     // Writes past the "do we control this channel" guard in setVolume(). ONLY for
     // putting back a value the probe itself wrote -- leaving the 0.03125 test value
     // in somebody else's dataref because the user switched the channel off mid-probe
@@ -183,17 +186,23 @@ private:
     // makes hit tests unreachable on any display with UI scaling != 1.0.
     PanelLayout layout;
     XPLMFontHandle font;
+    // Owned, so it can be destroyed. initialize() runs on every XPluginEnable, and a
+    // local ID here meant each enable scheduled another 1 Hz loop that nobody could
+    // ever stop -- see the note on createFlightLoop().
+    XPLMFlightLoopID flightLoopID;
     int fontAttempts;
     uint32_t currentColor;
     float currentLineWidth;
     int screenLeft, screenBottom, screenRight, screenTop;
     int screenWidth, screenHeight;   // derived: right-left, top-bottom
     bool drawControlBox;
+    // True until the panel position has been seeded once. Distinct from autoPosition:
+    // this is "have we ever placed it", that is "should it follow the corner".
+    bool positionSeeded;
     // Group membership only changes when a channel is switched on or off, an add-on
     // turns up, or the font finally loads and label widths become measurable. The
     // draw callback runs at frame rate, so it does not rebuild the list every frame.
     bool groupsDirty;
-    bool screenSizeChanged;
     bool saveRequired;
     bool autoPosition;
     bool dragging;
@@ -217,6 +226,11 @@ private:
     static const float DRAG_RADIUS;
     static const float H_GAP;
     static const float DRAG_HALF;
+    // How close to the snap corner a drag has to land before the panel returns to
+    // auto-positioning. Generous on purpose -- this is a gesture ("shove it back into
+    // the corner"), not a target you are asked to hit.
+    static const float SNAP_TOLERANCE_X;
+    static const float SNAP_TOLERANCE_Y;
 
     // Knobs data. One entry per Channels::DEFS entry, always, in that order.
     std::vector<VolumeKnob> knobs;
@@ -229,6 +243,8 @@ private:
     // Helper functions
     void updateScreenSize();
     void readScreenBounds();
+    void createFlightLoop();
+    void destroyFlightLoop();
     void ensureFont();
     void buildGroups();
     float captionHeight() const;

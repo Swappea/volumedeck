@@ -71,6 +71,14 @@ Split by X-Plane SDK role:
 - `src/VolumeCommands.h/.cpp` — the custom X-Plane commands. Self-contained: a static binding table plus one shared handler, talking to `VolumeDeck` only through its public methods.
 - `src/main.cpp` and `VolumeDeck` are coupled through the small public surface on the class (`toggleControlBox`, `adjustKnobVolume`, `isMouseOverKnobPublic`, `isOver*Icon`, drag methods). `main.cpp` does **no coordinate arithmetic** — every hit test lives on `VolumeDeck` beside the code that draws the thing, so art and click target cannot drift apart. Adding a clickable element means a draw call plus an `isOverX()` method, then one call in `MouseClickHandler`.
 
+### `initialize()` runs on every enable, not once
+
+The singleton outlives a disable/enable cycle — `instance` is a static pointer and nothing deletes it, and `shutdown()` is wired to `XPluginStop`, not `XPluginDisable`. So `XPluginEnable` calls `initialize()` again against a fully populated object. Anything in there that looks like first-run setup has to be written to tolerate that:
+
+- **The flight loop is owned** (`flightLoopID` member, `createFlightLoop()` / `destroyFlightLoop()`), created only if absent and destroyed in `disable()`. It used to be a local, so every re-enable scheduled another 1 Hz loop that nothing could stop. Beyond the wasted work that broke the add-on probe: one loop would run stage 1 and another stage 2, collapsing the deliberate one-second gap to whatever offset the loops happened to sit at. **That gap is the point** — it is the window in which a dataref's owner gets to re-assert its value and fail the probe honestly.
+- **The panel position is seeded once** (`positionSeeded`), or whenever `autoPosition` is on. The config is *not* reloaded on a re-enable (stage 3 is long past), so unconditionally assigning the snap corner threw away a dragged position and left `autoPosition` false — stuck in the corner, not even following resizes, and the next save wrote the corner over the user's choice.
+- **`disable()` calls `abortPendingProbes()` first.** A probe caught at stage 2 has the test value in the dataref and the loop that would restore it is about to stop. Same hazard as switching a channel off mid-probe, and it matters more here: the dataref belongs to another plugin that is still running.
+
 ### Two callbacks, different jobs
 
 - `DrawWindowCallback` (in `main.cpp`, the window's own draw function) does all rendering. There is **no** `XPLMRegisterDrawCallback` — direct drawing is deprecated and runs in pixel coordinates, which cannot agree with the boxel coordinates the window's mouse events use.
@@ -186,7 +194,15 @@ All UI positions derive from `mainX`/`mainY`, the anchor at the bottom-right of 
 
 The header icon strip is laid out by the shared constants `ICON_SOUND_W`, `ICON_SAVE_CX`, `ICON_LAYOUT_CX`, `ICON_DRAG_CX`, `ICON_HALF`, `DRAG_HALF`. Both the art and the `isOver*Icon()` hit tests read them, so the two cannot drift — do not reintroduce literal offsets.
 
-`autoPosition` snaps the panel to the top-right corner and follows screen-size changes; dragging clears it, and dragging back near the corner restores it.
+`autoPosition` snaps the panel to the top-right corner and follows screen-size changes; dragging clears it, and dragging back near the corner restores it. `saveConfig()` writes the `X:`/`Y:` line **only when `autoPosition` is false**, so that flag is not cosmetic — it decides whether a dragged position is persisted at all.
+
+Three rules in `updateDragPosition()`, each of which was broken and is easy to re-break:
+
+- **The corner test is symmetric.** `autoPosition = nearCorner`, evaluated every tick. It used to only ever set the flag *true*: `startDragging()` cleared it, then the first drag tick still found the panel near the corner (the mouse has not moved yet) and set it straight back, where it stayed for the whole drag. The panel moved and looked right, but the position was never saved and the next re-enable correctly re-seeded it to the corner.
+- **Clamp to the screen first, then test the corner.** The test has to run on the position the user actually ends up looking at. Drag past the right edge and the raw position lands outside the snap zone while the clamped one sits inside it — recording "user positioned" for a panel visibly parked in the corner.
+- **`SNAP_TOLERANCE_X/Y` are generous on purpose** (45 x 35). This is a gesture, not a target. At the original 20 x 15 — smaller than the icon strip you grab the panel by — a deliberate shove into the corner missed by a single boxel in testing and was recorded as a user position.
+
+The grab offset is `-ICON_DRAG_CX`, not a literal: it was hardcoded to 95 against a handle at 105, so the panel jumped 10 boxels right on mouse-down.
 
 Two layouts share all of this. `LAYOUT_VERTICAL` is a column with labels in a strip to the left of each knob; `LAYOUT_HORIZONTAL` is a row with labels centred underneath. `panelWidth()`/`panelHeight()` and `updateKnobPositions()` branch on `layout`.
 
