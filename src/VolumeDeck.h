@@ -226,6 +226,11 @@ private:
     static const float DRAG_RADIUS;
     static const float H_GAP;
     static const float DRAG_HALF;
+    // How close to the snap corner a drag has to land before the panel returns to
+    // auto-positioning. Generous on purpose -- this is a gesture ("shove it back into
+    // the corner"), not a target you are asked to hit.
+    static const float SNAP_TOLERANCE_X;
+    static const float SNAP_TOLERANCE_Y;
 
     // Knobs data. One entry per Channels::DEFS entry, always, in that order.
     std::vector<VolumeKnob> knobs;

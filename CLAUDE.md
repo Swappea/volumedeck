@@ -194,7 +194,15 @@ All UI positions derive from `mainX`/`mainY`, the anchor at the bottom-right of 
 
 The header icon strip is laid out by the shared constants `ICON_SOUND_W`, `ICON_SAVE_CX`, `ICON_LAYOUT_CX`, `ICON_DRAG_CX`, `ICON_HALF`, `DRAG_HALF`. Both the art and the `isOver*Icon()` hit tests read them, so the two cannot drift — do not reintroduce literal offsets.
 
-`autoPosition` snaps the panel to the top-right corner and follows screen-size changes; dragging clears it, and dragging back near the corner restores it.
+`autoPosition` snaps the panel to the top-right corner and follows screen-size changes; dragging clears it, and dragging back near the corner restores it. `saveConfig()` writes the `X:`/`Y:` line **only when `autoPosition` is false**, so that flag is not cosmetic — it decides whether a dragged position is persisted at all.
+
+Three rules in `updateDragPosition()`, each of which was broken and is easy to re-break:
+
+- **The corner test is symmetric.** `autoPosition = nearCorner`, evaluated every tick. It used to only ever set the flag *true*: `startDragging()` cleared it, then the first drag tick still found the panel near the corner (the mouse has not moved yet) and set it straight back, where it stayed for the whole drag. The panel moved and looked right, but the position was never saved and the next re-enable correctly re-seeded it to the corner.
+- **Clamp to the screen first, then test the corner.** The test has to run on the position the user actually ends up looking at. Drag past the right edge and the raw position lands outside the snap zone while the clamped one sits inside it — recording "user positioned" for a panel visibly parked in the corner.
+- **`SNAP_TOLERANCE_X/Y` are generous on purpose** (45 x 35). This is a gesture, not a target. At the original 20 x 15 — smaller than the icon strip you grab the panel by — a deliberate shove into the corner missed by a single boxel in testing and was recorded as a user position.
+
+The grab offset is `-ICON_DRAG_CX`, not a literal: it was hardcoded to 95 against a handle at 105, so the panel jumped 10 boxels right on mouse-down.
 
 Two layouts share all of this. `LAYOUT_VERTICAL` is a column with labels in a strip to the left of each knob; `LAYOUT_HORIZONTAL` is a row with labels centred underneath. `panelWidth()`/`panelHeight()` and `updateKnobPositions()` branch on `layout`.
 

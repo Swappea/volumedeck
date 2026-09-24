@@ -42,6 +42,12 @@ const float VolumeDeck::ICON_DRAG_CX   = -105.0f;
 const float VolumeDeck::ICON_HALF      = 8.0f;
 const float VolumeDeck::DRAG_RADIUS    = 5.0f;
 const float VolumeDeck::DRAG_HALF      = 7.0f;
+// Was 20 x 15, which is smaller than the icon strip you grab the panel by -- a drag
+// shoved into the corner could miss by a single boxel and be recorded as a deliberate
+// user position, which is exactly what happened in testing (Y landed at 926 against a
+// zone of 927-957). Wide enough now to be a gesture rather than a dexterity test.
+const float VolumeDeck::SNAP_TOLERANCE_X = 45.0f;
+const float VolumeDeck::SNAP_TOLERANCE_Y = 35.0f;
 // The row layout needs more air between knobs than the column does: they sit
 // side by side with their labels underneath, so GAP_FIVE alone reads as cramped.
 const float VolumeDeck::H_GAP          = 12.0f;
@@ -1734,28 +1740,43 @@ void VolumeDeck::startDragging(int x, int y) {
 void VolumeDeck::updateDragPosition(int x, int y) {
     if (!dragging) return;
     
-    mainX = x + 95;
+    // Keep the drag handle under the cursor. ICON_DRAG_CX is where the handle sits
+    // relative to the anchor, so negating it is the grab offset -- the old literal 95
+    // was 10 short and made the panel jump right the moment you grabbed it.
+    mainX = x - ICON_DRAG_CX;
     mainY = y;
     saveRequired = true;
-    
-    // Check if close enough to snap to default position
-    if (mainX > snapMainX - 20 && mainX < snapMainX + 20 &&
-        mainY > snapMainY - 15 && mainY < snapMainY + 15) {
-        mainX = snapMainX;
-        mainY = snapMainY;
-        autoPosition = true;
-    }
-    
-    // Keep widget on screen
+
+    // Keep the panel on screen FIRST. The corner test below has to run against the
+    // position the user actually ends up looking at: drag past the right edge and the
+    // raw position lands outside the snap zone while the clamped one sits inside it,
+    // so testing first records "user positioned" for a panel visibly parked in the
+    // corner -- the same see-one-thing-store-another split this whole fix is about.
     if ((mainX - panelWidth()) < screenLeft) {
         mainX = screenLeft + panelWidth();
     } else if (mainX > screenRight) {
         mainX = screenRight;
     }
-    
+
     if (mainY - (4 * GAP_FIVE) - panelHeight() < screenBottom) {
         mainY = screenBottom + (4 * GAP_FIVE) + panelHeight();
     } else if ((mainY + 15) > screenTop) {
         mainY = screenTop - 15;
     }
+
+    // Snap to the default corner, and -- just as importantly -- UNsnap when dragged
+    // away from it. This test used to be one-way: startDragging() cleared
+    // autoPosition, then the first drag tick still found the panel near the corner
+    // (you have not moved the mouse yet) and set it straight back to true, where it
+    // stayed for the rest of the drag. The panel then moved and looked fine, but
+    // saveConfig() writes the X:/Y: line only when autoPosition is false, so the
+    // position was never persisted -- and the next re-enable or screen resize
+    // correctly re-seeded it to the corner, losing the drag.
+    bool nearCorner = (fabs(mainX - snapMainX) < SNAP_TOLERANCE_X &&
+                       fabs(mainY - snapMainY) < SNAP_TOLERANCE_Y);
+    if (nearCorner) {
+        mainX = snapMainX;
+        mainY = snapMainY;
+    }
+    autoPosition = nearCorner;
 }
