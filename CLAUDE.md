@@ -71,6 +71,14 @@ Split by X-Plane SDK role:
 - `src/VolumeCommands.h/.cpp` — the custom X-Plane commands. Self-contained: a static binding table plus one shared handler, talking to `VolumeDeck` only through its public methods.
 - `src/main.cpp` and `VolumeDeck` are coupled through the small public surface on the class (`toggleControlBox`, `adjustKnobVolume`, `isMouseOverKnobPublic`, `isOver*Icon`, drag methods). `main.cpp` does **no coordinate arithmetic** — every hit test lives on `VolumeDeck` beside the code that draws the thing, so art and click target cannot drift apart. Adding a clickable element means a draw call plus an `isOverX()` method, then one call in `MouseClickHandler`.
 
+### `initialize()` runs on every enable, not once
+
+The singleton outlives a disable/enable cycle — `instance` is a static pointer and nothing deletes it, and `shutdown()` is wired to `XPluginStop`, not `XPluginDisable`. So `XPluginEnable` calls `initialize()` again against a fully populated object. Anything in there that looks like first-run setup has to be written to tolerate that:
+
+- **The flight loop is owned** (`flightLoopID` member, `createFlightLoop()` / `destroyFlightLoop()`), created only if absent and destroyed in `disable()`. It used to be a local, so every re-enable scheduled another 1 Hz loop that nothing could stop. Beyond the wasted work that broke the add-on probe: one loop would run stage 1 and another stage 2, collapsing the deliberate one-second gap to whatever offset the loops happened to sit at. **That gap is the point** — it is the window in which a dataref's owner gets to re-assert its value and fail the probe honestly.
+- **The panel position is seeded once** (`positionSeeded`), or whenever `autoPosition` is on. The config is *not* reloaded on a re-enable (stage 3 is long past), so unconditionally assigning the snap corner threw away a dragged position and left `autoPosition` false — stuck in the corner, not even following resizes, and the next save wrote the corner over the user's choice.
+- **`disable()` calls `abortPendingProbes()` first.** A probe caught at stage 2 has the test value in the dataref and the loop that would restore it is about to stop. Same hazard as switching a channel off mid-probe, and it matters more here: the dataref belongs to another plugin that is still running.
+
 ### Two callbacks, different jobs
 
 - `DrawWindowCallback` (in `main.cpp`, the window's own draw function) does all rendering. There is **no** `XPLMRegisterDrawCallback` — direct drawing is deprecated and runs in pixel coordinates, which cannot agree with the boxel coordinates the window's mouse events use.

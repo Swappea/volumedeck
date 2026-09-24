@@ -215,6 +215,8 @@ PLUGIN_API void XPluginDisable(void) {
     
     g_enabled = false;
 
+    VolumeDeck::getInstance()->disable();
+
     VolumeCommands::unregisterHandlers();
 
     SettingsWindow::destroy();

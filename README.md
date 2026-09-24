@@ -298,6 +298,13 @@ A version 2 file (no `CHANNEL` / `ADDON` lines) loads unchanged and is rewritten
 the new format on the next save. Unknown lines are ignored, so a file written by a
 newer build does not break an older one.
 
+## Known behaviour
+
+Disabling and re-enabling VolumeDeck in Plugin Admin is safe: the flight loop is
+stopped and restarted rather than duplicated, a dragged panel keeps its position, and
+any add-on writability probe in flight puts the channel's level back before standing
+down.
+
 ## Requirements
 
 - **Build**: CMake 3.16+, C++17 compiler

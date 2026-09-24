@@ -67,10 +67,11 @@ VolumeDeck* VolumeDeck::getInstance() {
 
 VolumeDeck::VolumeDeck() 
     : mainX(0), mainY(0), snapMainX(0), snapMainY(0)
-    , layout(LAYOUT_VERTICAL), font(nullptr), fontAttempts(0), currentColor(0), currentLineWidth(1.0f)
+    , layout(LAYOUT_VERTICAL), font(nullptr), flightLoopID(nullptr)
+    , fontAttempts(0), currentColor(0), currentLineWidth(1.0f)
     , screenLeft(0), screenBottom(0), screenRight(0), screenTop(0)
     , screenWidth(0), screenHeight(0)
-    , drawControlBox(false), groupsDirty(true), screenSizeChanged(true)
+    , drawControlBox(false), positionSeeded(false), groupsDirty(true)
     , saveRequired(true), autoPosition(true)
     , dragging(false), firstDraw(true)
     , prevView(0), initialTestStage(1)
@@ -128,33 +129,30 @@ void VolumeDeck::initialize() {
                  screenLeft, screenBottom, screenRight, screenTop, screenWidth, screenHeight);
         XPLMDebugString(msg);
         
+        // The snap corner always tracks the screen. The panel's own position is
+        // seeded only the first time: initialize() runs again on every re-enable, and
+        // the config is NOT reloaded then (stage 3 is long past), so unconditionally
+        // assigning here threw away a dragged position -- and left autoPosition false,
+        // so it stayed in the corner without even following resizes, and the next save
+        // wrote the corner over what the user had chosen.
         snapMainX = screenRight - 10.0f;
         snapMainY = screenTop - 40.0f;
-        mainX = snapMainX;
-        mainY = snapMainY;
-        
-        snprintf(msg, sizeof(msg), "VolumeDeck: [INIT] Initial position: (%.1f, %.1f)\n", mainX, mainY);
+
+        if (!positionSeeded || autoPosition) {
+            mainX = snapMainX;
+            mainY = snapMainY;
+            positionSeeded = true;
+        }
+
+        snprintf(msg, sizeof(msg), "VolumeDeck: [INIT] Panel position: (%.1f, %.1f)%s\n",
+                 mainX, mainY, autoPosition ? " (auto)" : " (user)");
         XPLMDebugString(msg);
         
         // No XPLMRegisterDrawCallback here: direct drawing is deprecated and runs in
         // pixel coordinates, which cannot agree with the boxel coordinates the mouse
         // handler window uses. Drawing is driven from the window callback in main.cpp.
         
-        // Register flight loop callback
-        XPLMDebugString("VolumeDeck: [INIT] Creating flight loop...\n");
-        XPLMCreateFlightLoop_t flightLoopParams;
-        flightLoopParams.structSize = sizeof(XPLMCreateFlightLoop_t);
-        flightLoopParams.phase = xplm_FlightLoop_Phase_AfterFlightModel;
-        flightLoopParams.callbackFunc = flightLoopCallback;
-        flightLoopParams.refcon = this;
-        
-        XPLMFlightLoopID flightLoopID = XPLMCreateFlightLoop(&flightLoopParams);
-        if (flightLoopID == nullptr) {
-            XPLMDebugString("VolumeDeck: [ERROR] Failed to create flight loop!\n");
-        } else {
-            XPLMDebugString("VolumeDeck: [INIT] Scheduling flight loop...\n");
-            XPLMScheduleFlightLoop(flightLoopID, 1.0f, 1);
-        }
+        createFlightLoop();
         
         XPLMDebugString("VolumeDeck: [INIT] Updating screen size...\n");
         updateScreenSize();
@@ -172,9 +170,81 @@ void VolumeDeck::initialize() {
     }
 }
 
+// The singleton outlives a disable/enable cycle -- `instance` is a static pointer and
+// nothing deletes it -- so initialize() runs again on every XPluginEnable against a
+// fully populated object. The flight loop ID used to be a local here, which meant each
+// enable scheduled another 1 Hz loop and nothing could ever stop them. Beyond the
+// wasted work, it broke the add-on writability probe: one loop would run stage 1 and
+// another stage 2, collapsing the deliberate one-second gap to whatever offset the
+// loops happened to sit at. That gap is the whole point -- it is the window in which a
+// dataref's owner gets to re-assert its value and fail the probe honestly.
+void VolumeDeck::createFlightLoop() {
+    if (flightLoopID != nullptr) {
+        XPLMDebugString("VolumeDeck: [INIT] Flight loop already running, reusing it\n");
+        return;
+    }
+
+    XPLMDebugString("VolumeDeck: [INIT] Creating flight loop...\n");
+    XPLMCreateFlightLoop_t flightLoopParams;
+    flightLoopParams.structSize = sizeof(XPLMCreateFlightLoop_t);
+    flightLoopParams.phase = xplm_FlightLoop_Phase_AfterFlightModel;
+    flightLoopParams.callbackFunc = flightLoopCallback;
+    flightLoopParams.refcon = this;
+
+    flightLoopID = XPLMCreateFlightLoop(&flightLoopParams);
+    if (flightLoopID == nullptr) {
+        XPLMDebugString("VolumeDeck: [ERROR] Failed to create flight loop!\n");
+        return;
+    }
+
+    XPLMDebugString("VolumeDeck: [INIT] Scheduling flight loop...\n");
+    XPLMScheduleFlightLoop(flightLoopID, 1.0f, 1);
+}
+
+void VolumeDeck::destroyFlightLoop() {
+    if (flightLoopID == nullptr) return;
+    XPLMDestroyFlightLoop(flightLoopID);
+    flightLoopID = nullptr;
+    XPLMDebugString("VolumeDeck: Flight loop destroyed\n");
+}
+
+// Any probe caught at stage 2 has the test value sitting in the dataref right now, and
+// the flight loop that would have put the real one back is about to stop. Same hazard
+// as switching a channel off mid-probe, and the same fix -- except here it matters more,
+// because the dataref belongs to another plugin that is still running.
+void VolumeDeck::abortPendingProbes() {
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        VolumeKnob& knob = knobs[i];
+        if (knob.probeStage != 2 || !knob.available) {
+            knob.probeStage = 0;
+            continue;
+        }
+
+        writeVolumeRaw(i, knob.probeStash);
+        knob.interiorVolume = knob.probeStash;
+        knob.probeStage = 0;
+
+        char msg[160];
+        snprintf(msg, sizeof(msg), "VolumeDeck: [ADDON] Probe for %s aborted, level restored\n",
+                 knob.name.c_str());
+        XPLMDebugString(msg);
+    }
+}
+
+// A disabled plugin should do nothing. Stopping the loop here is also what makes the
+// create-once guard above correct across a disable/enable cycle.
+void VolumeDeck::disable() {
+    XPLMDebugString("VolumeDeck: Disabling...\n");
+    abortPendingProbes();
+    destroyFlightLoop();
+}
+
 void VolumeDeck::shutdown() {
     XPLMDebugString("VolumeDeck: Shutting down...\n");
-    
+
+    abortPendingProbes();
+    destroyFlightLoop();
+
     if (font != nullptr) {
         XPLMDestroyFont(font);
         font = nullptr;
@@ -200,7 +270,6 @@ float VolumeDeck::flightLoopCallback(float elapsedSinceLastCall, float elapsedTi
             
             vc->snapMainX = vc->screenRight - 10.0f;
             vc->snapMainY = vc->screenTop - 40.0f;
-            vc->screenSizeChanged = true;
             
             if (vc->autoPosition) {
                 vc->mainX = vc->snapMainX;
@@ -614,8 +683,7 @@ void VolumeDeck::setChannelEnabled(int index, bool on) {
 
     knob.enabled = on;
     saveRequired = true;
-    groupsDirty = true;
-    screenSizeChanged = true;   // the panel changes size when a knob comes or goes
+    groupsDirty = true;   // the panel changes size when a knob comes or goes
 
     char msg[160];
     snprintf(msg, sizeof(msg), "VolumeDeck: [SETTINGS] Channel %s %s\n",
@@ -881,7 +949,6 @@ void VolumeDeck::updateScreenSize() {
     readScreenBounds();
     snapMainX = screenRight - 10.0f;
     snapMainY = screenTop - 40.0f;
-    screenSizeChanged = true;
 }
 
 // The visible knobs, split into the sim group and one group per owning add-on
@@ -1017,7 +1084,6 @@ float VolumeDeck::horizontalCell() const {
 void VolumeDeck::toggleLayout() {
     layout = (layout == LAYOUT_VERTICAL) ? LAYOUT_HORIZONTAL : LAYOUT_VERTICAL;
     groupsDirty = true;   // column widths are per layout
-    screenSizeChanged = true;
     saveRequired = true;
 }
 
@@ -1441,7 +1507,6 @@ void VolumeDeck::loadConfig() {
                     mainX = x;
                     mainY = y;
                     autoPosition = false;
-                    screenSizeChanged = true;
                 }
             }
             continue;
@@ -1671,7 +1736,6 @@ void VolumeDeck::updateDragPosition(int x, int y) {
     
     mainX = x + 95;
     mainY = y;
-    screenSizeChanged = true;
     saveRequired = true;
     
     // Check if close enough to snap to default position
