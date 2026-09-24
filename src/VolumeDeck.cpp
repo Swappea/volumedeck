@@ -1,7 +1,9 @@
 #include "VolumeDeck.h"
+#include "Palette.h"
 #include "XPLMUtilities.h"
 #include "XPLMProcessing.h"
 #include "XPLMPlanes.h"
+#include "XPLMPlugin.h"
 #include "XPLMGraphics.h"
 #include <cmath>
 #include <fstream>
@@ -14,10 +16,25 @@
 
 // Initialize static members
 VolumeDeck* VolumeDeck::instance = nullptr;
+
+// Every loop that used to run 0..7 now runs the whole channel registry. knobs is
+// built one-to-one from Channels::DEFS and never grows or shrinks, so an index is
+// valid for the life of the process even when the channel is missing or switched off.
+static const int NUM_KNOBS = Channels::COUNT;
+
 const float VolumeDeck::KNOB_RADIUS = 22.0f;
 const float VolumeDeck::GAP_FIVE = 6.0f;
 const float VolumeDeck::FIXED_TEXT_SPACE = 70.0f;
 const float VolumeDeck::LABEL_FONT_SIZE = 15.0f;
+// Owner-plugin caption over an add-on group ("X-ATC-Chatter"). Smaller and quieter
+// than a channel label so it reads as a heading rather than another control.
+const float VolumeDeck::CAPTION_FONT_SIZE = 11.0f;
+// The sim group is captioned too. Without it, X-Plane's own knobs were the only
+// bank on the panel with nothing saying whose they are -- which reads as if the
+// captioned add-on group is the odd one out rather than a peer.
+static const char* const SIM_GROUP_CAPTION = "X-Plane";
+// Space between the sim group and an add-on group, with the divider down the middle.
+const float VolumeDeck::GROUP_GAP = 10.0f;
 const float VolumeDeck::ICON_SOUND_W   = 40.0f;
 const float VolumeDeck::ICON_SAVE_CX   = -57.0f;
 const float VolumeDeck::ICON_LAYOUT_CX = -83.0f;
@@ -41,25 +58,6 @@ static float knobAngle(float volume) {
     return fmodf(a, 360.0f);
 }
 
-// Palette: dark + amber (classic avionics)
-namespace Palette {
-    const float PANEL_BG[4]   = { 34/255.0f,  36/255.0f,  42/255.0f, 1.00f};
-    const float KNOB_FACE[4]  = { 64/255.0f,  68/255.0f,  76/255.0f, 1.00f};
-    const float KNOB_RING[4]  = { 16/255.0f,  18/255.0f,  22/255.0f, 1.00f};
-    const float POINTER[4]    = {255/255.0f, 179/255.0f,  64/255.0f, 1.00f};
-    const float TICK_SECOND[4]= {127/255.0f, 196/255.0f, 255/255.0f, 1.00f};
-    const float LABEL[4]      = {240/255.0f, 217/255.0f, 168/255.0f, 1.00f};
-    const float SAVE_DIRTY[4] = {224/255.0f,  82/255.0f,  82/255.0f, 0.90f};
-    const float SAVE_CLEAN[4] = { 76/255.0f, 199/255.0f, 110/255.0f, 0.90f};
-    const float ICON_OUTLINE[4]={ 16/255.0f,  18/255.0f,  22/255.0f, 1.00f};
-    const float ICON_IDLE[4]  = { 90/255.0f,  95/255.0f, 105/255.0f, 1.00f};
-    const float ICON_ACTIVE[4]= {255/255.0f, 179/255.0f,  64/255.0f, 1.00f};
-    const float DRAG_OUTER[4] = {240/255.0f, 217/255.0f, 168/255.0f, 0.55f};
-    const float DRAG_INNER[4] = {255/255.0f, 179/255.0f,  64/255.0f, 0.85f};
-    const float SAVE_SHADOW[4]= { 16/255.0f,  18/255.0f,  22/255.0f, 0.55f};
-    const float DISABLED[4]   = {110/255.0f, 115/255.0f, 125/255.0f, 1.00f};
-}
-
 VolumeDeck* VolumeDeck::getInstance() {
     if (instance == nullptr) {
         instance = new VolumeDeck();
@@ -72,41 +70,43 @@ VolumeDeck::VolumeDeck()
     , layout(LAYOUT_VERTICAL), font(nullptr), fontAttempts(0), currentColor(0), currentLineWidth(1.0f)
     , screenLeft(0), screenBottom(0), screenRight(0), screenTop(0)
     , screenWidth(0), screenHeight(0)
-    , drawControlBox(false), screenSizeChanged(true)
+    , drawControlBox(false), groupsDirty(true), screenSizeChanged(true)
     , saveRequired(true), autoPosition(true)
     , dragging(false), firstDraw(true)
     , prevView(0), initialTestStage(1)
 {
-    // Initialize knobs with dataref names
-    const char* knobNames[] = {"master", "exterior", "interior", "pilot", "copilot", "radio", "enviro", "ui"};
-    const char* datarefNames[] = {
-        "sim/operation/sound/master_volume_ratio",
-        "sim/operation/sound/exterior_volume_ratio",
-        "sim/operation/sound/interior_volume_ratio",
-        "sim/operation/sound/pilot_volume_ratio",
-        "sim/operation/sound/copilot_volume_ratio",
-        "sim/operation/sound/radio_volume_ratio",
-        "sim/operation/sound/enviro_volume_ratio",
-        "sim/operation/sound/ui_volume_ratio"
-    };
-    
+    // One knob per registry entry, in registry order. Display names live in the
+    // registry too, so "ui" keeps the initialism it deserves rather than becoming "Ui".
     for (int i = 0; i < NUM_KNOBS; i++) {
+        const ChannelDef& def = Channels::get(i);
+
         VolumeKnob knob;
-        knob.name = knobNames[i];
-        // "ui" reads badly as "Ui", so it gets the initialism it deserves.
-        if (knob.name == "ui") {
-            knob.displayName = "UI";
-        } else {
-            knob.displayName = knob.name;
-            knob.displayName[0] = (char)toupper((unsigned char)knob.displayName[0]);
-        }
+        knob.def         = &def;
+        knob.name        = def.slug;
+        knob.displayName = def.display;
+        knob.ownerName   = (def.owner != nullptr) ? def.owner : "";
+        knob.isAddon     = (def.kind == CH_ADDON);
         knob.x = 0;
         knob.y = 0;
         knob.textX = 0;
+        knob.textY = 0;
+        knob.hitPadLeft = 0;
         knob.interiorVolume = 1.0f;
         knob.exteriorVolume = KNOB_SINGLE_MARK;
         knob.preMuteVolume = -1.0f;
-        knob.dataRef = XPLMFindDataRef(datarefNames[i]);
+        knob.probeStage = 0;
+        knob.probeStash = 0.0f;
+        knob.probed = false;
+        knob.hasStoredValue = false;
+        // Add-ons default to controlled once detected; Settings is how you opt out.
+        knob.enabled = true;
+
+        knob.dataRef = XPLMFindDataRef(def.dataref);
+        // A sim channel is always there. An add-on's dataref belongs to another
+        // plugin, so a null here means nothing yet -- plugin load order is not
+        // guaranteed and resolveAddonDataRefs() keeps looking from the flight loop.
+        knob.available = (knob.dataRef != nullptr);
+
         knobs.push_back(knob);
     }
     
@@ -158,6 +158,10 @@ void VolumeDeck::initialize() {
         
         XPLMDebugString("VolumeDeck: [INIT] Updating screen size...\n");
         updateScreenSize();
+
+        // panelWidth()/panelHeight() read the group list, and updateDragPosition()
+        // clamps against them -- so it must not be empty before the first draw.
+        buildGroups();
         
         // Must happen outside any draw callback.
         ensureFont();
@@ -204,11 +208,19 @@ float VolumeDeck::flightLoopCallback(float elapsedSinceLastCall, float elapsedTi
             }
         }
         
-        // Handle initialization tests
+        // A third-party dataref may not exist when we enable -- plugin load order is
+        // not guaranteed, and the add-on may even be installed but disabled. Keep
+        // looking; it is a handful of string lookups once a second.
+        vc->refreshAddonChannels();
+
+        // Handle initialization tests. Sim channels only: an add-on channel runs its
+        // own two-tick probe from serviceKnobProbes(), because it may not have existed
+        // when these stages ran.
         if (vc->initialTestStage == 1) {
             XPLMDebugString("VolumeDeck: [LOOP] Running init test stage 1...\n");
             const float testValue = 0.03125f;
             for (int i = 0; i < NUM_KNOBS; i++) {
+                if (vc->knobs[i].isAddon) continue;
                 vc->knobs[i].exteriorVolume = vc->getVolume(i);
                 vc->setVolume(i, testValue);
             }
@@ -217,6 +229,7 @@ float VolumeDeck::flightLoopCallback(float elapsedSinceLastCall, float elapsedTi
             XPLMDebugString("VolumeDeck: [LOOP] Running init test stage 2...\n");
             const float testValue = 0.03125f;
             for (int i = 0; i < NUM_KNOBS; i++) {
+                if (vc->knobs[i].isAddon) continue;
                 float current = vc->getVolume(i);
                 float testResult = (fabs(current - testValue) < 0.001f) ? KNOB_SINGLE_MARK : KNOB_FAILED_TEST;
                 float originalValue = vc->knobs[i].exteriorVolume;
@@ -230,6 +243,10 @@ float VolumeDeck::flightLoopCallback(float elapsedSinceLastCall, float elapsedTi
             vc->initialTestStage = 0;
             XPLMDebugString("VolumeDeck: [LOOP] Initialization complete!\n");
         }
+
+        // Add-on probes run on their own clock: one may be discovered long after the
+        // stages above have finished, or re-armed when the user switches it on.
+        vc->serviceKnobProbes();
         
         // Commands and X-Plane's own sound menu both move volumes without
         // drawKnob() ever running, so refresh the cache here rather than
@@ -343,11 +360,37 @@ void VolumeDeck::drawControlPanel() {
         float x1 = mainX - panelWidth();
         float y2 = topBoxY - panelHeight();
         drawFilledRectangle(x1, topBoxY, mainX, y2);
-        
-        // Draw all knobs
+
+        // Group furniture: a rule separating each add-on group from what precedes it,
+        // and the owner plugin's name over the group so it is obvious whose volume
+        // that knob is. Positions come from updateKnobPositions() -- nothing here
+        // recomputes geometry.
+        for (size_t g = 0; g < groups.size(); g++) {
+            const PanelGroup& grp = groups[g];
+            if (!grp.hasDivider) continue;
+
+            setColor(Palette::DIVIDER);
+            setLineWidth(1.0f);
+            if (layout == LAYOUT_HORIZONTAL) {
+                drawLine(x1 + GAP_FIVE, grp.dividerPos, mainX - GAP_FIVE, grp.dividerPos);
+            } else {
+                drawLine(grp.dividerPos, topBoxY - GAP_FIVE, grp.dividerPos, y2 + GAP_FIVE);
+            }
+        }
+
+        for (size_t g = 0; g < groups.size(); g++) {
+            const PanelGroup& grp = groups[g];
+            if (grp.caption.empty()) continue;
+            drawText(grp.captionX, grp.captionY, grp.caption.c_str(),
+                     CAPTION_FONT_SIZE, Palette::MUTED, xplm_JustCenter);
+        }
+
+        // Draw the knobs
         setColor(Palette::KNOB_FACE);
-        for (int i = 0; i < NUM_KNOBS; i++) {
-            drawKnob(i);
+        for (size_t g = 0; g < groups.size(); g++) {
+            for (size_t k = 0; k < groups[g].knobIndices.size(); k++) {
+                drawKnob(groups[g].knobIndices[k]);
+            }
         }
         
         firstDraw = false;
@@ -358,6 +401,7 @@ void VolumeDeck::drawControlPanel() {
 
 void VolumeDeck::drawKnob(int knobIndex) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
+    if (!isChannelDrawable(knobIndex)) return;
 
     try {
         VolumeKnob& knob = knobs[knobIndex];
@@ -494,17 +538,235 @@ void VolumeDeck::drawLayoutIcon() {
     }
 }
 
+// Everything above this pair works in normalised 0..1. The registry's minValue and
+// maxValue are the only place a channel's real units are known, so an add-on that
+// stores 0..100 needs nothing but its numbers in Channels.cpp.
 float VolumeDeck::getVolume(int knobIndex) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return 0.0f;
-    if (knobs[knobIndex].dataRef == nullptr) return 0.0f;
-    return XPLMGetDataf(knobs[knobIndex].dataRef);
+    const VolumeKnob& knob = knobs[knobIndex];
+    if (knob.dataRef == nullptr) return 0.0f;
+
+    float span = knob.def->maxValue - knob.def->minValue;
+    if (span <= 0.0f) return 0.0f;
+    return clamp((XPLMGetDataf(knob.dataRef) - knob.def->minValue) / span, 0.0f, 1.0f);
 }
 
 void VolumeDeck::setVolume(int knobIndex, float value) {
-    value = clamp(value, 0.0f, 1.0f);
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
-    if (knobs[knobIndex].dataRef == nullptr) return;
-    XPLMSetDataf(knobs[knobIndex].dataRef, value);
+    VolumeKnob& knob = knobs[knobIndex];
+    if (knob.dataRef == nullptr) return;
+
+    // An add-on dataref belongs to another plugin. If the user has not switched that
+    // channel on in Settings we never write to it -- not on load, not on a view
+    // change, not from a command.
+    if (knob.isAddon && !knob.enabled) return;
+
+    writeVolumeRaw(knobIndex, value);
+}
+
+void VolumeDeck::writeVolumeRaw(int knobIndex, float value) {
+    if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
+    VolumeKnob& knob = knobs[knobIndex];
+    if (knob.dataRef == nullptr) return;
+
+    value = clamp(value, 0.0f, 1.0f);
+    XPLMSetDataf(knob.dataRef,
+                 knob.def->minValue + value * (knob.def->maxValue - knob.def->minValue));
+}
+
+// --- channel state, for main.cpp, VolumeCommands and the settings window ---
+
+bool VolumeDeck::isChannelAvailable(int index) const {
+    if (index < 0 || index >= NUM_KNOBS) return false;
+    return knobs[index].available;
+}
+
+bool VolumeDeck::isChannelEnabled(int index) const {
+    if (index < 0 || index >= NUM_KNOBS) return false;
+    return knobs[index].enabled;
+}
+
+bool VolumeDeck::isChannelDrawable(int index) const {
+    if (index < 0 || index >= NUM_KNOBS) return false;
+    // An add-on with no owner name has no group to live in, so buildGroups() skips
+    // it and it is never positioned. Saying it is drawable anyway would leave
+    // isMouseOverKnob() testing against the constructor's x/y of (0,0) -- a wheel in
+    // the bottom-left corner of the screen adjusting an invisible channel. The two
+    // must agree; the registry is expected to give every CH_ADDON an owner.
+    if (knobs[index].isAddon && knobs[index].ownerName.empty()) return false;
+    return knobs[index].available && knobs[index].enabled;
+}
+
+bool VolumeDeck::isChannelControllable(int index) const {
+    if (index < 0 || index >= NUM_KNOBS) return false;
+    if (!knobs[index].available) return false;
+    return !knobs[index].isAddon || knobs[index].enabled;
+}
+
+float VolumeDeck::getChannelVolume(int index) {
+    return getVolume(index);
+}
+
+void VolumeDeck::setChannelEnabled(int index, bool on) {
+    if (index < 0 || index >= NUM_KNOBS) return;
+    VolumeKnob& knob = knobs[index];
+    if (knob.enabled == on) return;
+
+    knob.enabled = on;
+    saveRequired = true;
+    groupsDirty = true;
+    screenSizeChanged = true;   // the panel changes size when a knob comes or goes
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "VolumeDeck: [SETTINGS] Channel %s %s\n",
+             knob.name.c_str(), on ? "enabled" : "disabled");
+    XPLMDebugString(msg);
+
+    // Switching an add-on on is the moment we are allowed to touch its dataref, and
+    // serviceKnobProbes() picks that up from state on the next tick. It is not done
+    // here: the old condition also required exteriorVolume == KNOB_SINGLE_MARK, which
+    // a stored split-mode value quietly breaks.
+}
+
+// Third-party channels come and go at runtime, in both directions: the owning plugin
+// may load after we do, may not be installed at all, or may be switched off (or back
+// on) in Plugin Admin mid-session. So this re-evaluates every add-on every tick rather
+// than resolving once and caching forever.
+//
+// Two signals, and both are needed. The dataref alone is not enough: a plugin disabled
+// in Plugin Admin gets XPluginDisable, but whether that unregisters its datarefs is up
+// to the plugin, so the dataref can outlive the thing that services it -- which is
+// exactly how a disabled X-ATC-Chatter went on reading "detected". XPLMIsPluginEnabled()
+// answers the question the dataref cannot.
+void VolumeDeck::refreshAddonChannels() {
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        VolumeKnob& knob = knobs[i];
+        if (!knob.isAddon) continue;
+
+        bool running = true;
+        if (knob.def->pluginSignature != nullptr) {
+            XPLMPluginID owner = XPLMFindPluginBySignature(knob.def->pluginSignature);
+            running = (owner != XPLM_NO_PLUGIN_ID) && (XPLMIsPluginEnabled(owner) != 0);
+        }
+
+        XPLMDataRef found = running ? XPLMFindDataRef(knob.def->dataref) : nullptr;
+        bool nowAvailable = (found != nullptr);
+
+        if (nowAvailable == knob.available) {
+            knob.dataRef = found;   // handles can be reissued across a reload
+            continue;
+        }
+
+        char msg[400];
+
+        if (!nowAvailable) {
+            // Gone. Drop the handle rather than keeping it: it belonged to a plugin
+            // that may since have been unloaded, and a stale dataref handle is not
+            // safe to read, let alone write. Clearing `probed` means a fresh
+            // writability probe if the add-on comes back.
+            knob.dataRef    = nullptr;
+            knob.available  = false;
+            knob.probeStage = 0;
+            knob.probed     = false;
+            groupsDirty     = true;
+
+            snprintf(msg, sizeof(msg), "VolumeDeck: [ADDON] Lost %s (%s) -- %s\n",
+                     knob.def->dataref, knob.ownerName.c_str(),
+                     running ? "dataref unregistered" : "plugin disabled or unloaded");
+            XPLMDebugString(msg);
+            continue;
+        }
+
+        knob.dataRef   = found;
+        knob.available = true;
+        groupsDirty    = true;
+
+        snprintf(msg, sizeof(msg), "VolumeDeck: [ADDON] Found %s (%s) -> %s\n",
+                 knob.def->dataref, knob.ownerName.c_str(),
+                 knob.enabled ? "controlling" : "not controlling (off in Settings)");
+        XPLMDebugString(msg);
+
+        // Arming is serviceKnobProbes()' job, from state -- see the note there.
+    }
+}
+
+// The two-tick writability probe, per knob. The global one in flightLoopCallback()
+// cannot serve add-ons: their datarefs may appear minutes later. Note the separate
+// probeStash field -- parking the real volume in exteriorVolume is what once made
+// updateVolumesForViewChange() write it back over the test value and lock every knob.
+void VolumeDeck::serviceKnobProbes() {
+    const float testValue = 0.03125f;
+
+    // Arm anything we are allowed to drive and have not measured yet. Driven by
+    // state rather than by an availability transition: an add-on that was already
+    // running when this singleton was constructed never has one -- the constructor
+    // resolved its dataref, so refreshAddonChannels() sees no change and arms
+    // nothing, and the knob stays unprobed forever. That left loadConfig()'s
+    // `probed` gate permanently shut, so the saved level was never applied and the
+    // next sync quietly overwrote it with whatever the add-on happened to be at.
+    //
+    // Gated on isReady() so a saved "CHANNEL <slug> 0" -- read at stage 3, after
+    // this would otherwise have fired -- is honoured before we write to somebody
+    // else's dataref.
+    if (isReady()) {
+        for (int i = 0; i < NUM_KNOBS; i++) {
+            VolumeKnob& knob = knobs[i];
+            if (!knob.isAddon || knob.probed || knob.probeStage != 0) continue;
+            if (!knob.available || !knob.enabled) continue;
+            knob.probeStage = 1;
+        }
+    }
+
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        VolumeKnob& knob = knobs[i];
+        if (knob.probeStage == 0) continue;
+
+        if (!knob.available || !knob.enabled) {
+            // Switched off mid-probe. Stage 2 means the test value is sitting in the
+            // dataref right now, so put the real level back before walking away.
+            if (knob.probeStage == 2 && knob.available) {
+                writeVolumeRaw(i, knob.probeStash);
+                knob.interiorVolume = knob.probeStash;
+            }
+            knob.probeStage = 0;
+            continue;
+        }
+
+        if (knob.probeStage == 1) {
+            knob.probeStash = getVolume(i);
+            setVolume(i, testValue);
+            knob.probeStage = 2;
+            continue;
+        }
+
+        // Stage 2: did the write stick?
+        bool writable = fabs(getVolume(i) - testValue) < 0.001f;
+        knob.probeStage = 0;
+        knob.probed = true;
+
+        if (!writable) {
+            setVolume(i, knob.probeStash);
+            knob.interiorVolume = knob.probeStash;
+            knob.exteriorVolume = KNOB_FAILED_TEST;
+        } else if (knob.hasStoredValue) {
+            // We have a saved level for this channel: apply it now that we finally can.
+            int currentView = XPLMGetDatai(viewExternalDataRef);
+            float wanted = (knob.exteriorVolume >= 0.0f && currentView != 0)
+                         ? knob.exteriorVolume : knob.interiorVolume;
+            setVolume(i, wanted);
+        } else {
+            // Nothing saved -- adopt whatever the add-on is already set to rather than
+            // yanking the user's level to our default on first sight.
+            setVolume(i, knob.probeStash);
+            knob.interiorVolume = knob.probeStash;
+            knob.exteriorVolume = KNOB_SINGLE_MARK;
+        }
+
+        char msg[200];
+        snprintf(msg, sizeof(msg), "VolumeDeck: [ADDON] Probe for %s: %s\n",
+                 knob.name.c_str(), writable ? "writable" : "NOT writable (knob locked)");
+        XPLMDebugString(msg);
+    }
 }
 
 bool VolumeDeck::isOverSoundIcon(int x, int y) const {
@@ -532,6 +794,7 @@ bool VolumeDeck::isOverDragHandle(int x, int y) const {
 
 bool VolumeDeck::isKnobLocked(int knobIndex) const {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return true;
+    if (!isChannelControllable(knobIndex)) return true;
     return knobs[knobIndex].exteriorVolume == KNOB_FAILED_TEST;
 }
 
@@ -543,6 +806,11 @@ void VolumeDeck::syncKnobFromDataRef(int knobIndex, bool flagChanges) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
 
     VolumeKnob& knob = knobs[knobIndex];
+
+    // Nothing to read from a dataref that does not exist, an add-on we were told not
+    // to touch, or a knob whose probe currently has the test value in the dataref.
+    if (!knob.available || (knob.isAddon && !knob.enabled) || knob.probeStage != 0) return;
+
     int currentView = XPLMGetDatai(viewExternalDataRef);
 
     // A view change is pending: updateVolumesForViewChange() owns the knob values
@@ -568,6 +836,7 @@ void VolumeDeck::syncKnobFromDataRef(int knobIndex, bool flagChanges) {
 void VolumeDeck::muteToggle(int knobIndex) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
     if (!isReady() || isKnobLocked(knobIndex)) return;
+    if (!isChannelControllable(knobIndex) || knobs[knobIndex].probeStage != 0) return;
 
     VolumeKnob& knob = knobs[knobIndex];
 
@@ -587,6 +856,9 @@ void VolumeDeck::updateVolumesForViewChange() {
     int currentView = XPLMGetDatai(viewExternalDataRef);
 
     for (int i = 0; i < NUM_KNOBS; i++) {
+        if (!knobs[i].available || knobs[i].probeStage != 0) continue;
+        if (knobs[i].isAddon && !knobs[i].enabled) continue;
+
         if (knobs[i].exteriorVolume >= 0) {
             if (currentView == 0) {
                 // Interior view
@@ -612,69 +884,214 @@ void VolumeDeck::updateScreenSize() {
     screenSizeChanged = true;
 }
 
+// The visible knobs, split into the sim group and one group per owning add-on
+// plugin. Rebuilt on every layout pass, because Settings can switch a channel on or
+// off and an add-on can be discovered, at any moment.
+void VolumeDeck::buildGroups() {
+    groupsDirty = false;
+    groups.clear();
+
+    PanelGroup sim;
+    sim.caption      = SIM_GROUP_CAPTION;
+    sim.isAddonGroup = false;
+    sim.labelWidth   = FIXED_TEXT_SPACE;
+    sim.captionX = sim.captionY = 0.0f;
+    sim.dividerPos = 0.0f;
+    sim.hasDivider = false;
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        if (knobs[i].isAddon || !isChannelDrawable(i)) continue;
+        sim.knobIndices.push_back(i);
+    }
+    if (!sim.knobIndices.empty()) groups.push_back(sim);
+
+    // One group per owning plugin rather than per knob, so a plugin that exposes
+    // several channels gets a single caption over the lot.
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        if (!knobs[i].isAddon || !isChannelDrawable(i)) continue;
+        if (knobs[i].ownerName.empty()) continue;
+
+        int found = -1;
+        for (size_t g = 0; g < groups.size(); g++) {
+            if (groups[g].isAddonGroup && groups[g].caption == knobs[i].ownerName) {
+                found = (int)g;
+                break;
+            }
+        }
+        if (found < 0) {
+            PanelGroup fresh;
+            fresh.caption = knobs[i].ownerName;
+            fresh.isAddonGroup = true;
+            fresh.labelWidth = 0.0f;
+            fresh.captionX = fresh.captionY = 0.0f;
+            fresh.dividerPos = 0.0f;
+            fresh.hasDivider = true;
+            groups.push_back(fresh);
+            found = (int)groups.size() - 1;
+        }
+        groups[found].knobIndices.push_back(i);
+    }
+
+    // An add-on column only needs to be as wide as its own labels -- and every column
+    // has to be wide enough for its caption, or "X-ATC-Chatter" hangs off the end of a
+    // one-knob column.
+    for (size_t g = 0; g < groups.size(); g++) {
+        float w = groups[g].labelWidth;   // FIXED_TEXT_SPACE for the sim column
+
+        if (groups[g].isAddonGroup) {
+            for (size_t k = 0; k < groups[g].knobIndices.size(); k++) {
+                float m = measureText(knobs[groups[g].knobIndices[k]].displayName.c_str(),
+                                      LABEL_FONT_SIZE);
+                if (m > w) w = m;
+            }
+            w += GAP_FIVE * 2.0f;
+        }
+
+        float capOverhang = measureText(groups[g].caption.c_str(), CAPTION_FONT_SIZE)
+                          + GAP_FIVE - KNOB_RADIUS * 2.0f;
+        if (capOverhang > w) w = capOverhang;
+
+        groups[g].labelWidth = w;
+    }
+}
+
+// Vertical space reserved above each group for its caption.
+float VolumeDeck::captionHeight() const {
+    return groups.empty() ? 0.0f : (CAPTION_FONT_SIZE + GAP_FIVE);
+}
+
 // Panel extent measured from the mainX/mainY anchor, per layout.
 float VolumeDeck::panelWidth() const {
+    if (groups.empty()) return KNOB_RADIUS * 2 + FIXED_TEXT_SPACE;
+
     if (layout == LAYOUT_HORIZONTAL) {
-        return NUM_KNOBS * (horizontalCell() + H_GAP) + H_GAP;
+        // The widest row decides, and rows are right-aligned under the anchor.
+        size_t widest = 0;
+        for (size_t g = 0; g < groups.size(); g++) {
+            if (groups[g].knobIndices.size() > widest) widest = groups[g].knobIndices.size();
+        }
+        return widest * (horizontalCell() + H_GAP) + H_GAP;
     }
-    return KNOB_RADIUS * 2 + FIXED_TEXT_SPACE;
+
+    float w = 0.0f;
+    for (size_t g = 0; g < groups.size(); g++) {
+        w += KNOB_RADIUS * 2 + groups[g].labelWidth;
+        if (g + 1 < groups.size()) w += GROUP_GAP;
+    }
+    return w;
 }
 
 float VolumeDeck::panelHeight() const {
+    if (groups.empty()) return KNOB_RADIUS * 2 + (2 * GAP_FIVE);
+
     if (layout == LAYOUT_HORIZONTAL) {
-        // one row of knobs plus a label line underneath
-        return KNOB_RADIUS * 2 + H_GAP * 2 + GAP_FIVE + LABEL_FONT_SIZE;
+        // One row of knobs per group, each with a caption line above and a label line
+        // underneath.
+        float h = H_GAP;
+        for (size_t g = 0; g < groups.size(); g++) {
+            h += captionHeight() + KNOB_RADIUS * 2 + GAP_FIVE + LABEL_FONT_SIZE + H_GAP;
+        }
+        return h;
     }
-    return NUM_KNOBS * KNOB_RADIUS * 2 + (NUM_KNOBS + 1) * GAP_FIVE;
+
+    size_t tallest = 0;
+    for (size_t g = 0; g < groups.size(); g++) {
+        if (groups[g].knobIndices.size() > tallest) tallest = groups[g].knobIndices.size();
+    }
+    return captionHeight() + tallest * KNOB_RADIUS * 2 + (tallest + 1) * GAP_FIVE;
 }
 
 // Width of one knob cell in the row layout. The knobs sit shoulder to shoulder
 // with their labels underneath, so a cell has to be as wide as the widest label
-// or the text runs together ("InteriorExteriorMaster").
+// or the text runs together ("InteriorExteriorMaster"). Measured across every
+// visible channel so cells stay the same size from row to row.
 float VolumeDeck::horizontalCell() const {
     float cell = KNOB_RADIUS * 2.0f;
-    if (font != nullptr) {
-        for (int i = 0; i < NUM_KNOBS; i++) {
-            float w = XPLMFontMeasureString(font, LABEL_FONT_SIZE, knobs[i].displayName.c_str());
-            if (w > cell) cell = w;
-        }
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        if (!isChannelDrawable(i)) continue;
+        float w = measureText(knobs[i].displayName.c_str(), LABEL_FONT_SIZE);
+        if (w > cell) cell = w;
     }
     return cell;
 }
 
 void VolumeDeck::toggleLayout() {
     layout = (layout == LAYOUT_VERTICAL) ? LAYOUT_HORIZONTAL : LAYOUT_VERTICAL;
+    groupsDirty = true;   // column widths are per layout
     screenSizeChanged = true;
     saveRequired = true;
 }
 
 void VolumeDeck::updateKnobPositions() {
+    if (groupsDirty) buildGroups();
+
     float topBoxY = mainY - (4 * GAP_FIVE);
+    float capH = captionHeight();
 
     if (layout == LAYOUT_HORIZONTAL) {
-        // A single row running leftwards from the anchor, labels centred beneath.
+        // One row per group, each running leftwards from the anchor with its labels
+        // centred beneath, and an add-on group's owner caption centred above.
         float cell = horizontalCell();
-        float cy = topBoxY - H_GAP - KNOB_RADIUS;
-        float cx = mainX - H_GAP - cell * 0.5f;
-        for (int i = 0; i < NUM_KNOBS; i++) {
-            knobs[i].x = cx;
-            knobs[i].y = cy;
-            knobs[i].textX = cx;
-            knobs[i].textY = cy - KNOB_RADIUS - GAP_FIVE - LABEL_FONT_SIZE * 0.5f;
-            cx -= (cell + H_GAP);
+        float rowTop = topBoxY - H_GAP;
+
+        for (size_t g = 0; g < groups.size(); g++) {
+            PanelGroup& grp = groups[g];
+
+            // The rule separates one group from the one above it, so the first row
+            // does not get one.
+            grp.hasDivider = (g > 0);
+            grp.dividerPos = rowTop + H_GAP * 0.5f;
+            rowTop -= capH;
+
+            float cy = rowTop - KNOB_RADIUS;
+            float cx = mainX - H_GAP - cell * 0.5f;
+            float firstCx = cx, lastCx = cx;
+
+            for (size_t k = 0; k < grp.knobIndices.size(); k++) {
+                VolumeKnob& knob = knobs[grp.knobIndices[k]];
+                knob.x = cx;
+                knob.y = cy;
+                knob.textX = cx;
+                knob.textY = cy - KNOB_RADIUS - GAP_FIVE - LABEL_FONT_SIZE * 0.5f;
+                knob.hitPadLeft = KNOB_RADIUS;
+                lastCx = cx;
+                cx -= (cell + H_GAP);
+            }
+
+            grp.captionX = (firstCx + lastCx) * 0.5f;
+            grp.captionY = rowTop + GAP_FIVE * 0.5f;
+
+            rowTop -= KNOB_RADIUS * 2 + GAP_FIVE + LABEL_FONT_SIZE + H_GAP;
         }
         return;
     }
 
-    // Vertical: a column down the right edge, labels in the strip to the left.
-    float y = topBoxY - KNOB_RADIUS;
-    float textX = mainX - KNOB_RADIUS * 2 - FIXED_TEXT_SPACE + 3;
-    for (int i = 0; i < NUM_KNOBS; i++) {
-        knobs[i].x = mainX - KNOB_RADIUS - 2;
-        knobs[i].y = y - 1;
-        knobs[i].textX = textX;
-        knobs[i].textY = y - 1 - LABEL_FONT_SIZE * 0.35f;
-        y = y - GAP_FIVE - KNOB_RADIUS * 2;
+    // Vertical: one column per group, laid right to left from the anchor, each with
+    // its labels in the strip to the left of its knobs.
+    float right = mainX;
+
+    for (size_t g = 0; g < groups.size(); g++) {
+        PanelGroup& grp = groups[g];
+        float colW = KNOB_RADIUS * 2 + grp.labelWidth;
+        float knobCx = right - KNOB_RADIUS - 2;
+        float textX  = right - colW + 3;
+        float y = topBoxY - capH - KNOB_RADIUS;
+
+        for (size_t k = 0; k < grp.knobIndices.size(); k++) {
+            VolumeKnob& knob = knobs[grp.knobIndices[k]];
+            knob.x = knobCx;
+            knob.y = y - 1;
+            knob.textX = textX;
+            knob.textY = y - 1 - LABEL_FONT_SIZE * 0.35f;
+            knob.hitPadLeft = KNOB_RADIUS + grp.labelWidth;
+            y = y - GAP_FIVE - KNOB_RADIUS * 2;
+        }
+
+        grp.captionX  = right - colW * 0.5f;
+        grp.captionY  = topBoxY - capH + GAP_FIVE * 0.5f;
+        grp.hasDivider = (g > 0);
+        grp.dividerPos = right + GROUP_GAP * 0.5f;
+
+        right -= colW + GROUP_GAP;
     }
 }
 
@@ -691,10 +1108,14 @@ bool VolumeDeck::isMouseNearIcon(int x, int y) {
 
 bool VolumeDeck::isMouseOverKnob(int knobIndex, int x, int y) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return false;
+    // A knob that is not on screen has no click target, and its x/y are stale.
+    if (!isChannelDrawable(knobIndex)) return false;
 
     VolumeKnob& knob = knobs[knobIndex];
-    // Vertical layout: the label strip to the left of the knob is part of its target.
-    float leftPad = (layout == LAYOUT_VERTICAL) ? (KNOB_RADIUS + FIXED_TEXT_SPACE) : KNOB_RADIUS;
+    // Vertical layout: the label strip to the left of the knob is part of its target,
+    // and each column sizes its own strip -- so the pad is whatever the layout pass
+    // reserved for this knob, not a panel-wide constant.
+    float leftPad = (knob.hitPadLeft > 0.0f) ? knob.hitPadLeft : KNOB_RADIUS;
     return (x >= (knob.x - leftPad) &&
             x <= (knob.x + KNOB_RADIUS) &&
             y >= (knob.y - KNOB_RADIUS) &&
@@ -834,20 +1255,36 @@ void VolumeDeck::ensureFont() {
         return;
     }
 
+    // Label widths were estimates until now, so the columns need re-measuring.
+    groupsDirty = true;
     XPLMDebugString("VolumeDeck: [INIT] Font loaded\n");
 }
 
 void VolumeDeck::drawString(float x, float y, const char* text) {
-    // No ensureFont() here. This runs inside the panel draw callback, and
-    // XPLMCreateFont is rejected there ("Never call this function from within a
-    // panel draw callback") -- it is fatal, not a no-op. The font is built in
-    // initialize() and retried from the flight loop; if it is missing we skip text.
-    if (font == nullptr) return;
+    drawText(x, y, text, LABEL_FONT_SIZE, Palette::LABEL,
+             layout == LAYOUT_HORIZONTAL ? xplm_JustCenter : xplm_JustLeft);
+}
 
-    XPLMFontDrawString(font, XPLMMakeColor(Palette::LABEL[0], Palette::LABEL[1],
-                                           Palette::LABEL[2], Palette::LABEL[3]),
-                       LABEL_FONT_SIZE, x, y, text,
-                       layout == LAYOUT_HORIZONTAL ? xplm_JustCenter : xplm_JustLeft);
+// The one place text is drawn, by the panel and by the settings window alike.
+//
+// No ensureFont() here. This runs inside a panel draw callback, and XPLMCreateFont
+// is rejected there ("Never call this function from within a panel draw callback")
+// -- it is fatal, not a no-op. The font is built in initialize() and retried from
+// the flight loop; if it is missing we skip text.
+void VolumeDeck::drawText(float x, float y, const char* text, float size,
+                          const float rgba[4], XPLMJustification_t justify) const {
+    if (font == nullptr || text == nullptr) return;
+
+    XPLMFontDrawString(font, XPLMMakeColor(rgba[0], rgba[1], rgba[2], rgba[3]),
+                       size, x, y, text, justify);
+}
+
+// Falls back to a rough estimate while the font is still loading, so a layout pass
+// on one of those early frames does not collapse every column to zero width.
+float VolumeDeck::measureText(const char* text, float size) const {
+    if (text == nullptr) return 0.0f;
+    if (font == nullptr) return 0.5f * size * (float)strlen(text);
+    return XPLMFontMeasureString(font, size, text);
 }
 
 std::string VolumeDeck::getConfigPath() {
@@ -924,6 +1361,11 @@ void VolumeDeck::loadConfig() {
     int fileVersion = 0;
     std::string currentAircraft = getAircraftFileName();
     bool foundAircraft = false;
+
+    std::vector<int> simChannels;
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        if (!knobs[i].isAddon) simChannels.push_back(i);
+    }
     
     while (std::getline(file, line)) {
         // Parse version
@@ -932,6 +1374,56 @@ void VolumeDeck::loadConfig() {
             continue;
         }
         
+        // Which channels the user wants on the panel / wants us to control. Global,
+        // not per aircraft. Checked before the ".acf" test below, which would
+        // otherwise claim any line that happens to mention an aircraft file.
+        if (line.compare(0, 8, "CHANNEL ") == 0) {
+            char slug[64] = {0};
+            int on = 1;
+            if (sscanf(line.c_str(), "CHANNEL %63s %d", slug, &on) == 2) {
+                int idx = Channels::findBySlug(slug);
+                // An unknown slug is a channel from a newer build. Leave it alone --
+                // saveConfig() rewrites these lines from live state, so it will be
+                // dropped rather than corrupting anything.
+                if (idx >= 0) knobs[idx].enabled = (on != 0);
+            }
+            continue;
+        }
+
+        // Add-on levels are stored once, globally, not per aircraft: chatter volume
+        // is a property of the add-on, not of the aeroplane you happen to be flying.
+        if (line.compare(0, 6, "ADDON ") == 0) {
+            char slug[64] = {0};
+            float intVol = 0.0f, extVol = KNOB_SINGLE_MARK;
+            if (sscanf(line.c_str(), "ADDON %63s %f %f", slug, &intVol, &extVol) == 3) {
+                int idx = Channels::findBySlug(slug);
+                if (idx >= 0 && knobs[idx].isAddon) {
+                    // An add-on's probe can finish either side of this load, so unlike
+                    // the sim channels we cannot assume probe-then-load. If the probe
+                    // already said "not writable", that verdict describes reality and
+                    // the stored pair must not clear it.
+                    bool locked = (knobs[idx].exteriorVolume == KNOB_FAILED_TEST);
+
+                    knobs[idx].interiorVolume = intVol;
+                    if (!locked) {
+                        knobs[idx].exteriorVolume = (extVol < 0.0f) ? KNOB_SINGLE_MARK : extVol;
+                    }
+                    knobs[idx].hasStoredValue = true;
+
+                    // If the add-on was already up and probed, apply the stored level
+                    // now. If it was not, serviceKnobProbes() applies it the moment
+                    // the dataref appears.
+                    if (!locked && knobs[idx].probed && isChannelControllable(idx)) {
+                        int currentView = XPLMGetDatai(viewExternalDataRef);
+                        float wanted = (knobs[idx].exteriorVolume >= 0.0f && currentView != 0)
+                                     ? knobs[idx].exteriorVolume : knobs[idx].interiorVolume;
+                        setVolume(idx, wanted);
+                    }
+                }
+            }
+            continue;
+        }
+
         // Parse layout
         if (line.find("LAYOUT") != std::string::npos) {
             int lay = 0;
@@ -965,25 +1457,30 @@ void VolumeDeck::loadConfig() {
                 std::string data = line.substr(acfEnd);
                 std::istringstream iss(data);
                 
-                int knobNum = 0;
+                // The aircraft line carries the sim channels only, in registry
+                // order -- exactly the eight pairs a v2 file already had, so an old
+                // file still loads. Add-on levels live on their own global lines.
+                size_t pos = 0;
                 float intVol, extVol;
-                while (iss >> intVol >> extVol && knobNum < NUM_KNOBS) {
-                    knobs[knobNum].interiorVolume = intVol;
+                while (pos < simChannels.size() && (iss >> intVol >> extVol)) {
+                    int k = simChannels[pos];
+                    knobs[k].interiorVolume = intVol;
                     // Builds before this fix wrote KNOB_FAILED_TEST (-2) to disk.
                     // Collapse any negative sentinel to single-value mode so an
                     // already-poisoned file heals itself on the next load rather
                     // than locking the knob grey forever.
-                    knobs[knobNum].exteriorVolume =
+                    knobs[k].exteriorVolume =
                         (extVol < 0.0f) ? KNOB_SINGLE_MARK : extVol;
-                    
+                    knobs[k].hasStoredValue = true;
+
                     int currentView = XPLMGetDatai(viewExternalDataRef);
-                    if (currentView == 0 || knobs[knobNum].exteriorVolume < 0) {
-                        setVolume(knobNum, knobs[knobNum].interiorVolume);
+                    if (currentView == 0 || knobs[k].exteriorVolume < 0) {
+                        setVolume(k, knobs[k].interiorVolume);
                     } else {
-                        setVolume(knobNum, knobs[knobNum].exteriorVolume);
+                        setVolume(k, knobs[k].exteriorVolume);
                     }
-                    
-                    knobNum++;
+
+                    pos++;
                 }
                 break;
             }
@@ -992,10 +1489,16 @@ void VolumeDeck::loadConfig() {
     
     file.close();
     
-    if (foundAircraft && fileVersion > 1) {
+    // An older file is left flagged dirty so the next save rewrites it in the
+    // current format, with the global CHANNEL / ADDON lines this version adds.
+    if (foundAircraft && fileVersion >= FILE_FORMAT_VERSION) {
         saveRequired = false;
     }
     
+    // CHANNEL lines can have changed which knobs are on the panel, and LAYOUT which
+    // shape they are in.
+    groupsDirty = true;
+
     char logMsg[300];
     snprintf(logMsg, sizeof(logMsg), "VolumeDeck: [CONFIG] Config loaded for %s\n", currentAircraft.c_str());
     XPLMDebugString(logMsg);
@@ -1024,10 +1527,34 @@ void VolumeDeck::saveConfig() {
     }
     
     newContent << "LAYOUT " << (layout == LAYOUT_HORIZONTAL ? 1 : 0) << "\n";
-    
-    // Write current aircraft data
+
+    // Global, not per aircraft: which channels are on the panel, and what the
+    // third-party channels are set to. Written from live state every time, so a
+    // slug this build no longer knows about simply disappears.
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        newContent << "CHANNEL " << knobs[i].name << " " << (knobs[i].enabled ? 1 : 0) << "\n";
+    }
+
+    for (int i = 0; i < NUM_KNOBS; i++) {
+        if (!knobs[i].isAddon) continue;
+        // Only persist a level we actually measured or loaded. An add-on that is
+        // present but switched off is never probed and never synced, so it still
+        // holds the constructor default of 1.0 -- writing that out means re-enabling
+        // the channel later slams the add-on to 100%. A loaded-but-unapplied level
+        // (add-on not running this session) is still kept, rather than dropping the
+        // user's setting on the floor.
+        if (!knobs[i].probed && !knobs[i].hasStoredValue) continue;
+
+        float ext = knobs[i].exteriorVolume;
+        if (ext == KNOB_FAILED_TEST) ext = KNOB_SINGLE_MARK;
+        newContent << "ADDON " << knobs[i].name << " "
+                   << knobs[i].interiorVolume << " " << ext << "\n";
+    }
+
+    // Write current aircraft data: the sim channels only, in registry order.
     newContent << currentAircraft;
     for (int i = 0; i < NUM_KNOBS; i++) {
+        if (knobs[i].isAddon) continue;
         // KNOB_FAILED_TEST describes THIS run's probe, not a user setting -- the
         // same dataref may be writable under another aircraft or a later X-Plane
         // build. It must never reach the file: config load is stage 3, after the
@@ -1053,6 +1580,10 @@ void VolumeDeck::saveConfig() {
             
             if (line.find("X:") != std::string::npos) continue;
             if (line.find("LAYOUT") != std::string::npos) continue;
+            // Rewritten from live state above; must not be duplicated from the
+            // old file, and must be skipped before the ".acf" test below.
+            if (line.compare(0, 8, "CHANNEL ") == 0) continue;
+            if (line.compare(0, 6, "ADDON ") == 0) continue;
             
             if (line.find(".acf") != std::string::npos) {
                 size_t acfEnd = line.find(".acf") + 4;
@@ -1082,6 +1613,7 @@ void VolumeDeck::saveConfig() {
 
 void VolumeDeck::toggleKnobMode(int knobIndex) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
+    if (!isChannelControllable(knobIndex)) return;
     
     VolumeKnob& knob = knobs[knobIndex];
     
@@ -1112,6 +1644,7 @@ void VolumeDeck::toggleKnobMode(int knobIndex) {
 void VolumeDeck::adjustKnobVolume(int knobIndex, int clicks) {
     if (knobIndex < 0 || knobIndex >= NUM_KNOBS) return;
     if (!isReady()) return;
+    if (!isChannelControllable(knobIndex) || knobs[knobIndex].probeStage != 0) return;
     
     float currentVolume = getVolume(knobIndex);
     float newVolume = currentVolume + (clicks * 0.02f);

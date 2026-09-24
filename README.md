@@ -5,9 +5,13 @@ On-screen volume control for X-Plane without pausing the simulator.
 ## Features
 
 - 8 volume controls: Master, Exterior, Interior, Pilot, Copilot, Radio, Enviro, UI
-- Mouse wheel adjustment, or 27 bindable X-Plane commands (keyboard, joystick, Stream Deck)
+- **Third-party add-on channels**, starting with X-ATC-Chatter, in their own group on
+  the panel captioned with the plugin they belong to
+- Mouse wheel adjustment, or 30 bindable X-Plane commands (keyboard, joystick, Stream Deck)
 - Separate interior/exterior volume settings per knob
 - Per-channel mute/unmute
+- A Settings window (Plugins > VolumeDeck > Settings) for choosing which channels
+  appear and which add-ons the plugin is allowed to control
 - Two layouts: a vertical column or a horizontal row, switchable at runtime
 - Draggable UI, per-aircraft settings
 - Works on Linux, Windows, and macOS
@@ -25,12 +29,47 @@ The header strip runs right to left: speaker, floppy (save), two-bar (layout),
 four-way arrow (drag). Everything except the speaker appears only while the panel
 is open.
 
+**Settings** lives in the X-Plane menu bar under *Plugins > VolumeDeck > Settings*.
+The same menu has Show / Hide Panel and Save Now.
+
 Each knob sweeps clockwise as the volume rises: minimum at 7:30, midpoint at 12:00,
 maximum at 4:30. The amber arc shows how much of the travel is used.
 
+## Third-party add-on support
+
+VolumeDeck can drive volume DataRefs belonging to other plugins, so one panel covers
+the whole soundscape rather than just X-Plane's own mixer.
+
+| Add-on | Channel | DataRef | Range |
+| --- | --- | --- | --- |
+| [X-ATC-Chatter](https://stickandrudderstudios.com/x-atc-chatter/) (SRS) | Chatter | `SRS/X-ATC-Chatter/chatter_volume` | 0.0 - 1.0 |
+
+How it behaves:
+
+- **Detection is continuous, both ways.** Plugin load order is not guaranteed, so
+  VolumeDeck keeps checking once a second rather than giving up at startup. An add-on
+  enabled in Plugin Admin mid-session is picked up when it appears; one that is
+  disabled or unloaded disappears from the panel and from Settings just as quickly.
+  Both the owning plugin's enabled state and its DataRef are checked, because a
+  disabled plugin can leave its DataRefs registered behind it.
+- **Nothing is written until the channel is switched on.** Open Settings to turn an
+  add-on channel off and VolumeDeck stops touching that DataRef entirely - no writes
+  on load, on a view change, or from a command.
+- **Add-on levels are saved globally, not per aircraft**, because chatter volume is a
+  property of the add-on rather than of the aeroplane. X-Plane's own channels stay
+  per aircraft. One Save writes both.
+- Add-on channels get the same `up` / `down` / `mute_toggle` commands as every other
+  channel, and they exist in the binding UI whether or not the add-on is installed -
+  so a keybinding does not evaporate when you uninstall something.
+- If a channel is not detected, its commands do nothing and its knob is not drawn.
+
+Adding another add-on is one row in `src/Channels.h` - slug, label, owner, DataRef
+and the range its units use. Everything else (knob, commands, config, settings row)
+follows from that entry.
+
 ## Commands
 
-The plugin registers 27 custom commands. Bind them to a key or joystick button in
+The plugin registers 30 custom commands. Bind them to a key or joystick button in
 X-Plane's own settings, or trigger them over the local web API (see below) from a
 Stream Deck or any other external controller.
 
@@ -82,6 +121,10 @@ Notes:
 - Commands do nothing for the first few seconds after load, while the plugin probes
   which volume DataRefs this aircraft actually allows writing to.
 - A channel whose DataRef this aircraft refuses to write is skipped by its commands.
+- Hiding an X-Plane channel in Settings only takes its knob off the panel. Its
+  commands keep working, so a keybinding never stops responding without explanation.
+  Switching an **add-on** channel off is different: that stops the writes as well,
+  because the DataRef belongs to another plugin.
 
 ## DataRefs
 
@@ -226,15 +269,34 @@ Output: `dist/VolumeDeck-v1.0-XPlane.zip`
 
 ## Configuration
 
-Settings stored per aircraft in:
+Settings are stored in:
 ```
 X-Plane 12/Output/preferences/VolumeDeck.dat
 ```
 
-The file holds the panel position, the chosen layout, and one line per aircraft with
-8 interior/exterior volume pairs. Saving is manual - click the floppy icon or run
+A line-oriented text file (format version 3):
+
+```
+VERSION 3
+X:2550 Y:1400                  # panel position, omitted while auto-positioned
+LAYOUT 1                       # 0 = column, 1 = row
+CHANNEL master 1               # one per channel: is it on the panel / controlled
+CHANNEL xatc_chatter 1
+ADDON xatc_chatter 0.45 -1     # add-on levels: global, interior + exterior
+Cessna_172SP.acf 0.04 -1 ...   # per aircraft: 8 interior/exterior pairs
+```
+
+Two scopes on purpose: X-Plane's channels are saved per aircraft, add-on levels once
+for everything. The Plugins menu says so, so the split is not a surprise after the
+fact.
+
+Saving is manual - click the floppy icon, use *Save now* in Settings, or run
 `volumedeck/panel/save`. Mute state is deliberately not saved, so a muted channel
 comes back unmuted after a restart.
+
+A version 2 file (no `CHANNEL` / `ADDON` lines) loads unchanged and is rewritten in
+the new format on the next save. Unknown lines are ignored, so a file written by a
+newer build does not break an older one.
 
 ## Requirements
 
