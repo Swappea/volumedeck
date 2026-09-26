@@ -36,3 +36,8 @@ Thumbs.db
 # start, so a copy dropped here is always a transient artefact.
 Log.txt
 Log_*.txt
+
+# Working notes that belong outside a public repo. Session handoffs live in a
+# secret gist; release notes are pasted into the GitHub release by hand.
+*-handoff-*.md
+RELEASE-NOTES-*.md
